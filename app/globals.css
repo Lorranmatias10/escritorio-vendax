@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+/* Tokens provisórios da marca Vendax: troque aqui (um lugar só) quando a identidade oficial chegar.
+   Verde é reservado para seleção, ação e estados positivos. */
+@theme {
+  --color-vx-fundo: #f4f5f4;
+  --color-vx-superficie: #ffffff;
+  --color-vx-linha: #dde1df;
+  --color-vx-grafite: #1f2326;
+  --color-vx-texto-2: #4a5157;
+  --color-vx-verde: #1d7a51;
+  --color-vx-verde-escuro: #155c3c;
+  --color-vx-verde-claro: #e6f3ec;
+  --color-vx-alerta: #a15c00;
+  --color-vx-alerta-claro: #fff4e0;
+  --color-vx-erro: #b42318;
+  --color-vx-erro-claro: #fdeceb;
+  --color-vx-info: #1d4ed8;
+  --color-vx-info-claro: #e8efff;
+  --color-vx-aprovacao: #6b3fa0;
+  --color-vx-aprovacao-claro: #f2ecfa;
+  --font-sans: var(--font-vx), ui-sans-serif, system-ui, sans-serif;
+}
+
+html { color-scheme: light; }
+body { background: var(--color-vx-fundo); color: var(--color-vx-grafite); }
+
+:focus-visible { outline: 3px solid var(--color-vx-verde); outline-offset: 2px; }

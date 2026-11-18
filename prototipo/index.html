@@ -1,0 +1,419 @@
+﻿<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Escritório de Agents VendaX</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f6f4f'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' fill='white' font-family='Arial' font-weight='bold'%3Ex%3C/text%3E%3C/svg%3E">
+<style>
+  :root { --bg:#eceef0; --card:#fff; --ink:#1d2320; --mute:#6b736f; --line:#e1e4e2; --verde:#1f8f5f;
+          --c-trabalho:#2ecc71; --c-conversa:#3b82f6; --c-transito:#f59e0b; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 18px; padding: 10px 18px; background: var(--card); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .logo { font-weight: 700; font-size: 22px; letter-spacing: -.5px; }
+  .logo b { color: #2fb37a; }
+  .titulo { font-size: 15px; color: var(--mute); }
+  .kpis { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  .kpi { display: flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 13px; }
+  .kpi strong { font-variant-numeric: tabular-nums; }
+  .relogio { font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .sim { font-size: 12px; padding: 4px 9px; border-radius: 999px; background: #fff4dd; color: #8a5a00; }
+  .d { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+  .d.trabalho { background: var(--c-trabalho); } .d.conversa { background: var(--c-conversa); } .d.transito { background: var(--c-transito); }
+
+  main { flex: 1; display: flex; min-height: 0; gap: 14px; padding: 14px; }
+  .palco { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; }
+  .predio { position: relative; width: 100%; max-width: calc((100vh - 90px) * 1.5); aspect-ratio: 3 / 2; }
+  .predio img, .predio svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .predio svg { pointer-events: none; overflow: visible; }
+  .agente { pointer-events: auto; cursor: pointer; }
+  .tag { position: absolute; display: flex; align-items: center; gap: 6px; background: rgba(20,24,22,.78); color: #fff;
+         font-size: clamp(8px, .75vw, 12px); padding: 3px 8px; border-radius: 999px; white-space: nowrap; pointer-events: none; transform: translate(6px, 6px); }
+
+  aside { width: 330px; flex: none; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; min-height: 0; }
+  .card h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--mute); }
+  #equipe { list-style: none; margin: 0; padding: 0; overflow: auto; }
+  #equipe li { display: flex; align-items: center; gap: 9px; padding: 6px 6px; border-radius: 8px; cursor: pointer; }
+  #equipe li:hover, #equipe li.sel { background: #f1f6f3; }
+  .av { width: 26px; height: 26px; border-radius: 50%; color: #fff; font-size: 12px; font-weight: 700; display: grid; place-items: center; flex: none; }
+  .info { min-width: 0; flex: 1; }
+  .nome { font-size: 14px; font-weight: 600; }
+  .nome span { font-weight: 400; color: var(--mute); font-size: 12px; }
+  .st { font-size: 12px; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .feedcard { flex: 1; }
+  #feed { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1; }
+  #feed li { font-size: 13px; padding: 7px 0; border-bottom: 1px solid var(--line); line-height: 1.35; animation: entra .35s ease; }
+  #feed time { color: var(--mute); font-size: 11px; margin-right: 4px; font-variant-numeric: tabular-nums; }
+  @keyframes entra { from { opacity: 0; transform: translateY(-4px); } }
+
+  @media (max-width: 900px) {
+    main { flex-direction: column; padding: 10px; }
+    aside { width: 100%; }
+    .predio { max-width: none; }
+    #feed { max-height: 260px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">venda<b>x</b></div>
+  <div class="titulo">Escritório de Agents</div>
+  <span class="sim" title="Os agentes ainda não estão ligados a sistemas reais">Simulação</span>
+  <div class="kpis">
+    <span class="kpi"><i class="d trabalho"></i>Trabalhando <strong id="k-trabalho">0</strong></span>
+    <span class="kpi"><i class="d conversa"></i>Conversando <strong id="k-conversa">0</strong></span>
+    <span class="kpi"><i class="d transito"></i>Em trânsito <strong id="k-transito">0</strong></span>
+  </div>
+  <div class="relogio" id="relogio">--:--</div>
+</header>
+<main>
+  <div class="palco">
+    <div class="predio" id="predio">
+      <img src="escritorio.png" alt="Escritório de agents VendaX">
+      <svg id="cena" viewBox="0 0 1536 1024" preserveAspectRatio="none"></svg>
+    </div>
+  </div>
+  <aside>
+    <div class="card"><h3>Equipe</h3><ul id="equipe"></ul></div>
+    <div class="card feedcard"><h3>Conversas ao vivo</h3><ul id="feed"></ul></div>
+  </aside>
+</main>
+<script>
+// Tudo em px da imagem original (1536x1024). A imagem não é alterada; agentes, elevador e etiquetas são uma camada por cima.
+const W = 1536, H = 1024, NS = 'http://www.w3.org/2000/svg';
+const FY = { 5: 238, 4: 430, 3: 594, 2: 770, 1: 957 };   // linha do piso de cada andar
+const DOOR = 1298, CAR_X = 1308, CAR_W = 98, CAR_H = 150, WALK = 75, EL_SPEED = 110;
+
+const SALAS = [
+  { id: 'direcao',     nome: 'Direção e Qualidade',         r: [228, 75, 1057, 165] },
+  { id: 'comercial',   nome: 'Comercial e Novos Negócios',  r: [228, 262, 547, 168] },
+  { id: 'marketing',   nome: 'Marketing da Vendax',         r: [778, 262, 507, 168] },
+  { id: 'contas',      nome: 'Gestão de Contas e Entrega',  r: [228, 450, 542, 145] },
+  { id: 'atendimento', nome: 'Atendimento e Conversão',     r: [775, 450, 510, 145] },
+  { id: 'performance', nome: 'Performance e Web',           r: [228, 615, 362, 155] },
+  { id: 'whatsapp',    nome: 'WhatsApp, Automação e IA',    r: [595, 615, 325, 155] },
+  { id: 'produto',     nome: 'Produto e Engenharia',        r: [925, 615, 360, 155] },
+  { id: 'financeiro',  nome: 'Financeiro e Administrativo', r: [228, 795, 1057, 165] },
+];
+
+const AGENTES = [
+  { id: 'helena',   nome: 'Helena',   cargo: 'CEO',              dept: 'direcao',     andar: 5, x0: 470,  cor: '#1f6f4f', pele: '#e0b48f', cabelo: '#3a2418' },
+  { id: 'otavio',   nome: 'Otávio',   cargo: 'Qualidade',        dept: 'direcao',     andar: 5, x0: 1010, cor: '#2d8a63', pele: '#c68a5e', cabelo: '#1d1d1d' },
+  { id: 'bruno',    nome: 'Bruno',    cargo: 'Closer',           dept: 'comercial',   andar: 4, x0: 300,  cor: '#e67e22', pele: '#f0c9a4', cabelo: '#5a3a1e' },
+  { id: 'carla',    nome: 'Carla',    cargo: 'SDR',              dept: 'comercial',   andar: 4, x0: 540,  cor: '#e67e22', pele: '#8d5a3b', cabelo: '#1a1110' },
+  { id: 'mariana',  nome: 'Mariana',  cargo: 'Marketing',        dept: 'marketing',   andar: 4, x0: 870,  cor: '#8e44ad', pele: '#f3cfb0', cabelo: '#b5651d' },
+  { id: 'lucas',    nome: 'Lucas',    cargo: 'Gestor de Contas', dept: 'contas',      andar: 3, x0: 570,  cor: '#2c7be5', pele: '#d9a37a', cabelo: '#2b1a10' },
+  { id: 'diego',    nome: 'Diego',    cargo: 'Atendimento',      dept: 'atendimento', andar: 3, x0: 820,  cor: '#16a085', pele: '#a8714c', cabelo: '#141414' },
+  { id: 'elisa',    nome: 'Elisa',    cargo: 'Conversão',        dept: 'atendimento', andar: 3, x0: 1225, cor: '#16a085', pele: '#f2d2b6', cabelo: '#d4a24c' },
+  { id: 'pedro',    nome: 'Pedro',    cargo: 'Tráfego e Web',    dept: 'performance', andar: 2, x0: 330,  cor: '#d64550', pele: '#e8bb93', cabelo: '#3b2a1a' },
+  { id: 'iara',     nome: 'Iara',     cargo: 'Automação e IA',   dept: 'whatsapp',    andar: 2, x0: 800,  cor: '#25a35a', pele: '#b07a52', cabelo: '#24150c' },
+  { id: 'rodrigo',  nome: 'Rodrigo',  cargo: 'Engenharia',       dept: 'produto',     andar: 2, x0: 1010, cor: '#34495e', pele: '#efc7a2', cabelo: '#222' },
+  { id: 'fernanda', nome: 'Fernanda', cargo: 'Financeiro',       dept: 'financeiro',  andar: 1, x0: 1050, cor: '#b7950b', pele: '#d8a985', cabelo: '#4a2c17' },
+];
+
+// Conversas da operação: [quem fala (0 = quem vai até o outro, 1 = quem recebe), fala]
+const FLUXOS = [
+  { de: 'mariana', para: 'pedro',    falas: [[0, 'Campanha de implante no ar!'], [1, 'Subo o orçamento no Meta.'], [0, 'Me manda o CPL no fim do dia.']] },
+  { de: 'pedro',   para: 'carla',    falas: [[0, 'Chegaram 32 leads hoje.'], [1, 'Já começo a qualificar.']] },
+  { de: 'carla',   para: 'bruno',    falas: [[0, 'Lead quente: Dr. Paulo, cirurgião.'], [1, 'Agendo a call pra hoje.'], [0, 'Ele quer ver cases.']] },
+  { de: 'bruno',   para: 'diego',    falas: [[0, 'Fechei! Assume o atendimento?'], [1, 'Já chamo no WhatsApp.']] },
+  { de: 'diego',   para: 'iara',     falas: [[0, 'Liga o follow-up automático?'], [1, 'Fluxo ativado no WhatsApp.'], [0, 'Perfeito, valeu!']] },
+  { de: 'bruno',   para: 'fernanda', falas: [[0, 'Contrato assinado, emite a cobrança.'], [1, 'Boleto enviado ao cliente.']] },
+  { de: 'fernanda',para: 'helena',   falas: [[0, 'Fechamos o mês com +18%.'], [1, 'Excelente! Mantém o plano.']] },
+  { de: 'elisa',   para: 'lucas',    falas: [[0, 'Cliente convertido, faz o onboarding?'], [1, 'Agendei o kickoff amanhã.']] },
+  { de: 'lucas',   para: 'rodrigo',  falas: [[0, 'Cliente pediu um relatório novo.'], [1, 'Entra na próxima sprint.']] },
+  { de: 'rodrigo', para: 'iara',     falas: [[0, 'Subi a versão nova do bot.'], [1, 'Testando as respostas agora.'], [1, 'Tudo certo por aqui.']] },
+  { de: 'otavio',  para: 'diego',    falas: [[0, 'Revisei 20 atendimentos.'], [0, 'Tempo de resposta ótimo!'], [1, 'Bom saber, obrigado!']] },
+  { de: 'helena',  para: 'lucas',    falas: [[0, 'Como está a satisfação?'], [1, 'NPS 72 este mês.'], [0, 'Muito bom!']] },
+  { de: 'pedro',   para: 'mariana',  falas: [[0, 'Landing nova convertendo 9%.'], [1, 'Vou usar no próximo criativo.']] },
+  { de: 'iara',    para: 'elisa',    falas: [[0, 'A IA já respondeu 140 leads.'], [1, 'Pego os que pediram humano.']] },
+  { de: 'fernanda',para: 'bruno',    falas: [[0, 'O cliente X pagou a entrada.'], [1, 'Ótimo, aviso o time.']] },
+  { de: 'carla',   para: 'mariana',  falas: [[0, 'Os leads de ontem vieram frios.'], [1, 'Vou ajustar o público.']] },
+];
+// Visual no estilo das pessoas da imagem: roupa social escura, camisa clara. [gênero, cor do terno, cor da camisa, cabelo]
+const VISUAL = {
+  helena: ['f', '#24272d', '#f4f4f2', 'coque'],   otavio: ['m', '#2e3238', '#ffffff', 'curto'],
+  bruno:  ['m', '#1f2733', '#ffffff', 'curto'],   carla:  ['f', '#2a2a2e', '#ece6dc', 'longo'],
+  mariana:['f', '#33363c', '#ffffff', 'longo'],   lucas:  ['m', '#25292f', '#dfe8f2', 'curto'],
+  diego:  ['m', '#1c1e22', '#ffffff', 'curto'],   elisa:  ['f', '#2b3038', '#f4f4f2', 'coque'],
+  pedro:  ['m', '#3a3e45', '#ffffff', 'curto'],   iara:   ['f', '#202328', '#ffffff', 'longo'],
+  rodrigo:['m', '#2a2d33', '#e9eef3', 'curto'],   fernanda:['f', '#2c2f35', '#ffffff', 'coque'],
+};
+const REUNIAO = {
+  host: 'helena', convidados: ['bruno', 'mariana', 'lucas', 'fernanda', 'rodrigo', 'otavio'],
+  falas: [[0, 'Bom dia! Pauta: metas da semana.'], [1, 'Do meu lado está tudo em dia.'], [2, 'Temos novidades pra mostrar.'],
+          [3, 'Os números estão subindo.'], [0, 'Ótimo. Foco em fechar o mês!']],
+};
+const TAREFAS = {
+  direcao: ['Revisando metas do trimestre', 'Aprovando processos'], comercial: ['Ligando para leads', 'Montando proposta'],
+  marketing: ['Criando criativos', 'Planejando campanha'], contas: ['Atualizando relatório', 'Checando entregas'],
+  atendimento: ['Respondendo no WhatsApp', 'Qualificando contato'], performance: ['Otimizando anúncios', 'Ajustando a landing'],
+  whatsapp: ['Treinando o bot', 'Ajustando fluxo'], produto: ['Codando feature', 'Revisando PR'], financeiro: ['Conciliando pagamentos', 'Emitindo notas'],
+};
+
+// ---------- utilidades ----------
+const $ = id => document.getElementById(id);
+const cena = $('cena');
+function E(tag, at, p) { const e = document.createElementNS(NS, tag); for (const k in at) e.setAttribute(k, at[k]); if (p) p.appendChild(e); return e; }
+function sombra(hex, k) { // k<0 escurece, k>0 clareia
+  const n = parseInt(hex.slice(1), 16), c = v => Math.round(k < 0 ? v * (1 + k) : v + (255 - v) * k);
+  return '#' + [n >> 16, (n >> 8) & 255, n & 255].map(v => c(v).toString(16).padStart(2, '0')).join('');
+}
+const DEFS = E('defs', {}, document.getElementById('cena'));
+{ // acabamento de render: leve desfoque + sombra suave, para combinar com a imagem 3D
+  const f = E('filter', { id: 'render', x: '-50%', y: '-20%', width: '200%', height: '140%' }, DEFS);
+  E('feGaussianBlur', { in: 'SourceGraphic', stdDeviation: .35, result: 'b' }, f);
+  E('feDropShadow', { in: 'b', dx: 1.2, dy: 1.5, stdDeviation: 1.6, 'flood-color': '#000', 'flood-opacity': .28 }, f);
+}
+function linear(id, stops, vertical) {
+  const g = E('linearGradient', { id, x1: 0, y1: 0, x2: vertical ? 0 : 1, y2: vertical ? 1 : 0 }, DEFS);
+  for (const [o, c] of stops) E('stop', { offset: o, 'stop-color': c }, g);
+}
+function radial(id, stops) {
+  const g = E('radialGradient', { id, cx: .38, cy: .35, r: .7 }, DEFS);
+  for (const [o, c] of stops) E('stop', { offset: o, 'stop-color': c }, g);
+}
+const rnd = a => a[Math.floor(Math.random() * a.length)];
+const hhmm = () => new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+const byId = Object.fromEntries(AGENTES.map(a => [a.id, a]));
+const salaDe = id => SALAS.find(s => s.id === id);
+
+// ---------- etiquetas das salas ----------
+for (const s of SALAS) {
+  const [x, y] = s.r, t = document.createElement('span');
+  t.className = 'tag'; t.id = 'tag-' + s.id;
+  t.style.left = x / W * 100 + '%'; t.style.top = y / H * 100 + '%';
+  t.innerHTML = `<i class="d trabalho"></i>${s.nome}`;
+  $('predio').insertBefore(t, cena); // abaixo da camada dos agentes, para não cobrir os balões
+}
+
+// ---------- elevador ----------
+const EL = { y: FY[1], stops: [], at: null, dwell: 0,
+  call(f) { if (!this.stops.includes(f) && this.at !== f) this.stops.push(f); } };
+const cabine = E('g', {}, cena);
+E('rect', { x: CAR_X, y: -CAR_H, width: CAR_W, height: CAR_H, rx: 4, fill: 'rgba(210,240,225,.18)', stroke: '#2f7d5b', 'stroke-width': 3 }, cabine);
+E('rect', { x: CAR_X, y: -4, width: CAR_W, height: 4, fill: '#2f7d5b' }, cabine);
+const luzEl = E('rect', { x: CAR_X + CAR_W / 2 - 12, y: -CAR_H + 6, width: 24, height: 4, rx: 2, fill: '#9be7c0' }, cabine);
+function stepEl(dt) {
+  if (EL.dwell > 0) { EL.dwell -= dt; if (EL.dwell <= 0) EL.at = null; return; }
+  if (!EL.stops.length) return;
+  const f = EL.stops[0], ty = FY[f], d = ty - EL.y, m = EL_SPEED * dt;
+  if (Math.abs(d) <= m) { EL.y = ty; EL.stops.shift(); EL.at = f; EL.dwell = 1.6; } else EL.y += Math.sign(d) * m;
+}
+const vagaLivre = () => [0, 1, 2, 3].find(k => !AGENTES.some(a => a.inCar && a.slot === k)) ?? -1;
+
+// ---------- desenho dos agentes ----------
+for (const a of AGENTES) {
+  Object.assign(a, { floor: a.andar, x: a.x0, y: FY[a.andar], dir: -1, phase: 0, q: [], busy: false, inCar: false,
+                     status: 'Trabalhando', cat: 'trabalho', bubT: 0, nextTask: 3 + Math.random() * 12, ultimas: [] });
+  const g = E('g', { class: 'agente' }, cena);
+  g.addEventListener('click', () => selecionar(a));
+  E('ellipse', { cx: 0, cy: 0, rx: 16, ry: 4, fill: 'rgba(0,0,0,.22)' }, g);
+  a.ring = E('ellipse', { cx: 0, cy: 0, rx: 22, ry: 7, fill: 'none', stroke: '#2fb37a', 'stroke-width': 3, display: 'none' }, g);
+  // Pessoa em pé, ~88px (mesma escala de quem está em pé na imagem), pés em y=0
+  const [gen, terno, camisa, cab] = VISUAL[a.id];
+  const terno2 = sombra(terno, -.35), calca = sombra(terno, -.2), sapato = '#121316';
+  // gradientes por agente: luz quente vindo de cima/esquerda, como na imagem
+  const gid = n => `${n}-${a.id}`;
+  linear(gid('terno'), [[0, sombra(terno, .22)], [.45, terno], [1, sombra(terno, -.4)]]);
+  linear(gid('calca'), [[0, sombra(calca, .15)], [.5, calca], [1, sombra(calca, -.4)]]);
+  linear(gid('camisa'), [[0, camisa], [1, sombra(camisa, -.18)]], true);
+  linear(gid('cab'), [[0, sombra(a.cabelo.length === 7 ? a.cabelo : '#222222', .25)], [1, a.cabelo]], true);
+  radial(gid('pele'), [[0, sombra(a.pele, .18)], [.7, a.pele], [1, sombra(a.pele, -.22)]]);
+  const T = `url(#${gid('terno')})`, C = `url(#${gid('calca')})`, P = `url(#${gid('pele')})`, CB = `url(#${gid('cab')})`;
+  const fig = E('g', { filter: 'url(#render)' }, g);
+  if (cab === 'longo') E('path', { d: 'M-7.5 -84 q-1.8 14 .5 23 q6.5 2 13 0 q2.3 -9 .5 -23 z', fill: CB }, fig); // cabelo por trás
+  a.armB = E('g', {}, fig);                                                   // braço de trás
+  E('path', { d: 'M-3 0 h6 l-.6 26 h-4.8 z', fill: terno2 }, a.armB);
+  E('ellipse', { cx: 0, cy: 28.3, rx: 2.6, ry: 3.3, fill: sombra(a.pele, -.2) }, a.armB);
+  a.legB = E('g', {}, fig);                                                   // perna de trás
+  E('path', { d: 'M-4 0 h8 l-.6 39 h-6.8 z', fill: sombra(calca, -.3) }, a.legB);
+  E('path', { d: 'M-3.8 37 h8.5 q4.6 0 4.6 4 h-13.1 z', fill: '#0d0e10' }, a.legB);
+  a.legF = E('g', {}, fig);                                                   // perna da frente
+  E('path', { d: 'M-4 0 h8 l-.6 39 h-6.8 z', fill: C }, a.legF);
+  E('path', { d: 'M-3.8 37 h8.5 q4.6 0 4.6 4 h-13.1 z', fill: sapato }, a.legF);
+  E('path', { d: 'M-3.2 39.6 h7 q2.5 0 3.6 1', stroke: 'rgba(255,255,255,.18)', 'stroke-width': .8, fill: 'none' }, a.legF);
+  E('path', { d: 'M-11.5 -67.5 Q-12.8 -54 -10.2 -37 L10.2 -37 Q12.8 -54 11.5 -67.5 Q6 -72.3 0 -72.3 Q-6 -72.3 -11.5 -67.5 Z', fill: T }, fig); // paletó
+  E('path', { d: 'M-10.8 -67 Q-6 -71 -1 -71.5', stroke: 'rgba(255,240,220,.28)', 'stroke-width': 1.2, fill: 'none' }, fig);           // brilho no ombro
+  E('path', { d: 'M-4.6 -71.6 L0 -56.5 L4.6 -71.6 Z', fill: `url(#${gid('camisa')})` }, fig);                                       // camisa
+  if (gen === 'm') E('path', { d: 'M-1.3 -69.2 L1.3 -69.2 L1.9 -58 L0 -55.2 L-1.9 -58 Z', fill: sombra(a.cor, -.35) }, fig);       // gravata
+  else E('rect', { x: 4.6, y: -62, width: 3.4, height: 4.8, rx: .8, fill: a.cor }, fig);                                           // crachá
+  E('path', { d: 'M-4.6 -71.6 L-1.3 -63 L-7.2 -65.8 Z M4.6 -71.6 L1.3 -63 L7.2 -65.8 Z', fill: sombra(terno, -.45) }, fig);         // lapelas
+  E('circle', { cx: 0, cy: -49, r: .8, fill: sombra(terno, -.6) }, fig); E('circle', { cx: 0, cy: -44, r: .8, fill: sombra(terno, -.6) }, fig); // botões
+  E('rect', { x: -2.6, y: -77, width: 5.2, height: 6.5, fill: sombra(a.pele, -.2) }, fig);                                          // pescoço
+  E('ellipse', { cx: 0, cy: -83.5, rx: 6.3, ry: 7.7, fill: P }, fig);                                                               // cabeça
+  E('ellipse', { cx: 6, cy: -83, rx: 1.4, ry: 2.2, fill: sombra(a.pele, -.15) }, fig);                                              // orelha
+  E('path', { d: 'M-4 -85.8 h2.4 M.8 -85.8 h2.4', stroke: sombra(a.cabelo.length === 7 ? a.cabelo : '#222222', -.2), 'stroke-width': .7 }, fig); // sobrancelhas
+  E('ellipse', { cx: -2.7, cy: -84.2, rx: .8, ry: .65, fill: '#1b1b1b' }, fig);
+  E('ellipse', { cx: 2, cy: -84.2, rx: .8, ry: .65, fill: '#1b1b1b' }, fig);
+  E('path', { d: 'M-.4 -83.6 q-.9 2.4 .5 2.6', stroke: sombra(a.pele, -.25), 'stroke-width': .6, fill: 'none' }, fig);              // nariz
+  E('path', { d: 'M-2 -79.3 q1.6 .8 3.2 0', stroke: sombra(a.pele, -.4), 'stroke-width': .6, fill: 'none' }, fig);                  // boca
+  if (cab === 'curto') E('path', { d: 'M-6.9 -83.5 Q-7.6 -92.8 0 -92.8 Q7.6 -92.8 6.9 -83.5 Q6.2 -88.2 1 -88.6 Q-4 -88.6 -6.9 -83.5 Z', fill: CB }, fig);
+  else {
+    E('path', { d: 'M-7.1 -81.5 Q-8.2 -93.2 0 -93.2 Q8.2 -93.2 7.1 -81.5 Q6 -89 0 -89.2 Q-5 -89 -7.1 -81.5 Z', fill: CB }, fig);
+    if (cab === 'coque') E('circle', { cx: 5.4, cy: -91.2, r: 3.6, fill: CB }, fig);
+  }
+  a.armF = E('g', {}, fig);                                                   // braço da frente
+  E('path', { d: 'M-3.1 0 h6.2 l-.6 26 h-5 z', fill: T }, a.armF);
+  E('path', { d: 'M-2.6 24.5 h5.2 v1.6 h-5.2 z', fill: camisa }, a.armF);   // punho da camisa
+  E('ellipse', { cx: 0, cy: 28.4, rx: 2.7, ry: 3.3, fill: P }, a.armF);
+  a.fig = fig;
+  const nome = E('g', {}, g);
+  a.nomeR = E('rect', { y: -116, height: 16, rx: 8, fill: 'rgba(20,24,22,.8)' }, nome);
+  a.nomeT = E('text', { y: -104, 'text-anchor': 'middle', 'font-size': 11, 'font-weight': 600, fill: '#fff', 'font-family': 'system-ui, sans-serif' }, nome);
+  a.nomeT.textContent = a.nome;
+  E('rect', { x: -2.5, y: -101, width: 5, height: 5, rx: 2.5, fill: a.cor }, nome);
+  const bub = E('g', { display: 'none' }, g);
+  a.bubR = E('rect', { y: -154, height: 30, rx: 10, fill: '#fff', stroke: a.cor, 'stroke-width': 2 }, bub);
+  a.bubTail = E('path', { d: 'M-6 -125 L0 -118 L6 -125 Z', fill: '#fff', stroke: a.cor, 'stroke-width': 2 }, bub);
+  a.bubT = E('text', { y: -134, 'text-anchor': 'middle', 'font-size': 14, fill: '#1d2320', 'font-family': 'system-ui, sans-serif' }, bub);
+  a.bub = bub; a.g = g; a.bubTime = 0;
+}
+for (const a of AGENTES) { const w = a.nomeT.getComputedTextLength() + 14; a.nomeR.setAttribute('x', -w / 2); a.nomeR.setAttribute('width', w); }
+
+function falar(a, txt, seg) {
+  a.bubT.textContent = txt; a.bub.setAttribute('display', 'inline'); a.bubTime = seg;
+  const w = a.bubT.getComputedTextLength() + 24;
+  // mantém o balão dentro da imagem
+  const off = Math.max(10 - (a.x - w / 2), Math.min(0, W - 10 - (a.x + w / 2)));
+  a.bubR.setAttribute('x', -w / 2 + off); a.bubR.setAttribute('width', w); a.bubT.setAttribute('x', off);
+}
+
+// ---------- movimento ----------
+function rota(a, andar, x, st) {
+  const p = [];
+  if (a.floor !== andar) p.push({ t: 'walk', x: DOOR, st: 'Indo ao elevador' }, { t: 'wait', dest: andar }, { t: 'ride', dest: andar });
+  p.push({ t: 'walk', x, st });
+  return p;
+}
+function andar(a, x, dt) {
+  const d = x - a.x, m = WALK * dt;
+  a.phase += dt * 10;
+  if (Math.abs(d) > .5) a.dir = Math.sign(d);
+  if (Math.abs(d) <= m) { a.x = x; return true; }
+  a.x += Math.sign(d) * m; return false;
+}
+function step(a, dt) {
+  const s = a.q[0];
+  if (!s) { if (!a.busy) { a.status = 'Trabalhando'; a.cat = 'trabalho'; } return; }
+  if (s.t === 'walk') { a.status = s.st; a.cat = 'transito'; if (andar(a, s.x, dt)) a.q.shift(); }
+  else if (s.t === 'wait') {
+    a.status = 'Esperando o elevador'; a.cat = 'transito'; EL.call(a.floor);
+    const k = vagaLivre();
+    if (EL.at === a.floor && EL.dwell > 0 && k >= 0) { a.inCar = true; a.slot = k; EL.call(s.dest); EL.dwell = Math.max(EL.dwell, 1); a.q.shift(); }
+  } else if (s.t === 'ride') {
+    a.status = 'No elevador'; a.cat = 'transito'; a.y = EL.y;
+    if (!andar(a, CAR_X + 22 + a.slot * 18, dt)) {} else a.phase = 0;
+    if (EL.at === s.dest) { a.inCar = false; a.floor = s.dest; a.y = FY[s.dest]; EL.dwell = Math.max(EL.dwell, .8); a.q.shift(); }
+  } else if (s.t === 'arrive') { a.q.shift(); s.enc.chegaram++; a.dir = Math.sign(s.enc.host.x - a.x) || 1; }
+  else if (s.t === 'done') { a.q.shift(); a.busy = false; a.dir = -1; }
+  if (!a.inCar) a.y = FY[a.floor];
+}
+
+// ---------- encontros (conversas e reuniões) ----------
+const ENCS = [];
+const livre = a => !a.busy && !a.q.length;
+function iniciar(host, convidados, falas, reuniao) {
+  const enc = { host, convidados, pessoas: reuniao ? [host, ...convidados] : [convidados[0], host], falas, i: 0, t: .4, chegaram: 0, reuniao };
+  host.busy = true; host.cat = 'conversa';
+  host.status = reuniao ? 'Esperando a reunião' : 'Aguardando ' + convidados[0].nome;
+  const sala = salaDe(host.dept).r, dentro = host.x + 50 < sala[0] + sala[2] - 10;
+  convidados.forEach((g, i) => {
+    g.busy = true;
+    const x = reuniao ? host.x + 70 + i * 60 : host.x + (dentro ? 46 : -46);
+    g.q = rota(g, host.andar, x, 'Indo até ' + host.nome);
+    g.q.push({ t: 'arrive', enc });
+  });
+  ENCS.push(enc);
+}
+function stepEnc(enc, dt) {
+  if (enc.chegaram < enc.convidados.length) return;
+  for (const p of enc.pessoas) { p.cat = 'conversa'; p.status = enc.reuniao ? 'Em reunião' : 'Conversando com ' + enc.pessoas.find(o => o !== p).nome; }
+  if (!enc.reuniao) enc.host.dir = Math.sign(enc.convidados[0].x - enc.host.x) || 1;
+  if ((enc.t -= dt) > 0) return;
+  if (enc.i < enc.falas.length) {
+    const [w, txt] = enc.falas[enc.i++], p = enc.pessoas[w];
+    falar(p, txt, 3.1); p.ultimas.unshift(txt); p.ultimas.length = Math.min(p.ultimas.length, 3);
+    const para = enc.reuniao ? 'reunião' : enc.pessoas.find(o => o !== p).nome;
+    registrar(p, para, txt);
+    enc.t = 3.4;
+  } else {
+    for (const g of enc.convidados) { g.q.push(...rota(g, g.andar, g.x0, 'Voltando à mesa'), { t: 'done' }); g.status = 'Voltando à mesa'; g.cat = 'transito'; }
+    enc.host.busy = false; enc.host.dir = -1;
+    ENCS.splice(ENCS.indexOf(enc), 1);
+  }
+}
+function agendar() {
+  if (ENCS.length >= 4) return;
+  const opcoes = FLUXOS.filter(f => livre(byId[f.de]) && livre(byId[f.para]));
+  if (opcoes.length) { const f = rnd(opcoes); iniciar(byId[f.para], [byId[f.de]], f.falas, false); }
+}
+function agendarReuniao() {
+  const host = byId[REUNIAO.host];
+  const conv = REUNIAO.convidados.map(id => byId[id]).filter(livre).sort(() => Math.random() - .5).slice(0, 3);
+  if (livre(host) && conv.length === 3) iniciar(host, conv, REUNIAO.falas, true);
+}
+
+// ---------- painel ----------
+let sel = null;
+function selecionar(a) { sel = sel === a ? null : a; for (const o of AGENTES) o.ring.setAttribute('display', o === sel ? 'inline' : 'none'); pintarPainel(); }
+function registrar(p, para, txt) {
+  const li = document.createElement('li');
+  li.innerHTML = `<time>${hhmm()}</time><b style="color:${p.cor}">${p.nome}</b> → ${para}: ${txt}`;
+  const f = $('feed'); f.prepend(li); while (f.children.length > 50) f.lastChild.remove();
+}
+$('equipe').addEventListener('click', e => { const li = e.target.closest('li'); if (li) selecionar(byId[li.dataset.id]); });
+function pintarPainel() {
+  $('equipe').innerHTML = AGENTES.map(a => `
+    <li data-id="${a.id}" class="${a === sel ? 'sel' : ''}">
+      <span class="av" style="background:${a.cor}">${a.nome[0]}</span>
+      <div class="info"><div class="nome">${a.nome} <span>· ${a.cargo}</span></div>
+      <div class="st">${a.status}${a === sel && a.ultimas.length ? ' — “' + a.ultimas[0] + '”' : ''}</div></div>
+      <i class="d ${a.cat}" title="${a.status}"></i></li>`).join('');
+  const n = { trabalho: 0, conversa: 0, transito: 0 };
+  for (const a of AGENTES) n[a.cat]++;
+  for (const k in n) $('k-' + k).textContent = n[k];
+  for (const s of SALAS) {
+    const cats = AGENTES.filter(a => a.dept === s.id).map(a => a.cat);
+    const c = cats.includes('conversa') ? 'conversa' : cats.includes('trabalho') ? 'trabalho' : 'transito';
+    $('tag-' + s.id).firstChild.className = 'd ' + c;
+  }
+  $('relogio').textContent = hhmm();
+}
+
+// ---------- loop ----------
+function desenhar(a) {
+  a.g.setAttribute('transform', `translate(${a.x.toFixed(1)},${a.y.toFixed(1)})`);
+  const andando = a.cat === 'transito' && a.q[0] && a.q[0].t === 'walk';
+  const sw = andando ? Math.sin(a.phase) * 22 : 0, bob = andando ? Math.abs(Math.sin(a.phase)) * -2 : 0;
+  a.fig.setAttribute('transform', `translate(0,${bob}) scale(${a.dir},1)`);
+  // pernas giram no quadril (y=-41), braços no ombro (y=-68); a.dir espelha a figura inteira
+  a.legF.setAttribute('transform', `translate(-1,-41) rotate(${sw})`); a.legB.setAttribute('transform', `translate(2,-41) rotate(${-sw})`);
+  a.armF.setAttribute('transform', `translate(-8.5,-68) rotate(${-sw * .8 + 4})`); a.armB.setAttribute('transform', `translate(8.5,-68) rotate(${sw * .8 - 4})`);
+}
+let last = performance.now(), tPainel = 0, tAgenda = 1, tReuniao = 25;
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  stepEl(dt);
+  cabine.setAttribute('transform', `translate(0,${EL.y.toFixed(1)})`);
+  luzEl.setAttribute('fill', EL.dwell > 0 ? '#9be7c0' : '#f5c26b');
+  for (const a of AGENTES) {
+    step(a, dt);
+    if (a.bubTime > 0 && (a.bubTime -= dt) <= 0) a.bub.setAttribute('display', 'none');
+    if (livre(a) && (a.nextTask -= dt) <= 0) { falar(a, rnd(TAREFAS[a.dept]) + '…', 2.6); a.nextTask = 12 + Math.random() * 18; }
+    desenhar(a);
+  }
+  for (const enc of [...ENCS]) stepEnc(enc, dt);
+  if ((tAgenda -= dt) <= 0) { agendar(); tAgenda = 2.5 + Math.random() * 3; }
+  if ((tReuniao -= dt) <= 0) { agendarReuniao(); tReuniao = 70 + Math.random() * 30; }
+  if ((tPainel -= dt) <= 0) { pintarPainel(); tPainel = .3; }
+  requestAnimationFrame(frame);
+}
+pintarPainel();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
