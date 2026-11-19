@@ -3,16 +3,17 @@
 /* Tokens provisórios da marca Vendax: troque aqui (um lugar só) quando a identidade oficial chegar.
    Verde é reservado para seleção, ação e estados positivos. */
 @theme {
-  --color-vx-fundo: #f4f5f4;
+  --color-vx-fundo: #f2f3f1;
   --color-vx-superficie: #ffffff;
-  --color-vx-linha: #dde1df;
-  --color-vx-grafite: #1f2326;
-  --color-vx-texto-2: #4a5157;
-  --color-vx-verde: #1d7a51;
-  --color-vx-verde-escuro: #155c3c;
-  --color-vx-verde-claro: #e6f3ec;
-  --color-vx-alerta: #a15c00;
-  --color-vx-alerta-claro: #fff4e0;
+  --color-vx-linha: #dfe3e0;
+  --color-vx-linha-forte: #c9cfcb;
+  --color-vx-grafite: #1c2326;
+  --color-vx-texto-2: #5a646b;
+  --color-vx-verde: #17784c;
+  --color-vx-verde-escuro: #0e5a37;
+  --color-vx-verde-claro: #e5f2eb;
+  --color-vx-alerta: #9a5800;
+  --color-vx-alerta-claro: #fff3df;
   --color-vx-erro: #b42318;
   --color-vx-erro-claro: #fdeceb;
   --color-vx-info: #1d4ed8;
@@ -20,9 +21,63 @@
   --color-vx-aprovacao: #6b3fa0;
   --color-vx-aprovacao-claro: #f2ecfa;
   --font-sans: var(--font-vx), ui-sans-serif, system-ui, sans-serif;
+  --shadow-vx: 0 1px 2px rgb(28 35 38 / .05), 0 1px 1px rgb(28 35 38 / .03);
+  --shadow-vx-alto: 0 4px 16px rgb(28 35 38 / .08), 0 1px 3px rgb(28 35 38 / .06);
 }
 
 html { color-scheme: light; }
-body { background: var(--color-vx-fundo); color: var(--color-vx-grafite); }
+body { background: var(--color-vx-fundo); color: var(--color-vx-grafite); font-size: 14px; line-height: 1.5; }
+.tabular, time, td { font-variant-numeric: tabular-nums; }
+a { text-underline-offset: 2px; }
 
-:focus-visible { outline: 3px solid var(--color-vx-verde); outline-offset: 2px; }
+:focus-visible { outline: 2px solid var(--color-vx-verde); outline-offset: 2px; border-radius: 4px; }
+
+/* Escritório: animação dos agentes, ligada ao estado real das tarefas */
+@keyframes vx-digitar { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+@keyframes vx-respirar { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+@keyframes vx-pulso { 0% { box-shadow: 0 0 0 0 var(--vx-cor-pulso); } 100% { box-shadow: 0 0 0 8px transparent; } }
+@keyframes vx-tremer { 0%, 90%, 100% { transform: translateX(0); } 92%, 96% { transform: translateX(-1.5px); } 94%, 98% { transform: translateX(1.5px); } }
+@keyframes vx-ponto { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+@keyframes vx-ronda { 0%, 16% { top: 9.3%; } 20%, 36% { top: 28.5%; } 40%, 56% { top: 46.4%; } 60%, 76% { top: 63%; } 80%, 96% { top: 78.1%; } 100% { top: 9.3%; } }
+@keyframes vx-brilho { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
+
+.vx-ag-trabalhando { animation: vx-digitar .6s ease-in-out infinite; }
+.vx-ag-aguardando { --vx-cor-pulso: color-mix(in srgb, var(--color-vx-aprovacao) 60%, transparent); animation: vx-pulso 1.6s ease-out infinite; }
+.vx-ag-bloqueado { --vx-cor-pulso: color-mix(in srgb, var(--color-vx-erro) 60%, transparent); animation: vx-pulso 1.6s ease-out infinite, vx-tremer 4s linear infinite; }
+.vx-ag-fila, .vx-ag-ocioso { animation: vx-respirar 3.2s ease-in-out infinite; }
+.vx-ponto { animation: vx-ponto 1.2s infinite; }
+.vx-ponto:nth-child(2) { animation-delay: .2s; }
+.vx-ponto:nth-child(3) { animation-delay: .4s; }
+.vx-elevador { transition: top 1.4s cubic-bezier(.6, 0, .3, 1); }
+.vx-elevador-ronda { animation: vx-ronda 30s ease-in-out infinite; }
+.vx-sala-alerta { animation: vx-brilho 2.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  [class*='vx-ag-'], .vx-ponto, .vx-elevador-ronda, .vx-sala-alerta { animation: none !important; }
+  .vx-elevador { transition: none; }
+}
+
+/* Bonecos: andar pela sala, virar no fim do trajeto, passo, gesto e fala alternada na conversa */
+@keyframes vx-andar { 0%, 100% { left: var(--de); } 50% { left: var(--ate); } }
+@keyframes vx-passo { 0%, 100% { transform: translateY(0) rotate(0); } 25% { transform: translateY(-1.5px) rotate(-3deg); } 75% { transform: translateY(-1.5px) rotate(3deg); } }
+@keyframes vx-gesto { 0%, 100% { transform: rotate(0); } 30% { transform: rotate(-4deg); } 60% { transform: rotate(2deg); } }
+@keyframes vx-fala { 0%, 45% { opacity: 1; transform: translate(-50%, 0); } 50%, 100% { opacity: 0; transform: translate(-50%, 2px); } }
+.vx-andar { animation: vx-andar 12s ease-in-out infinite; }
+.vx-passo { animation: vx-passo .5s ease-in-out infinite; }
+.vx-gesto { animation: vx-gesto 1.8s ease-in-out infinite; }
+.vx-fala { animation: vx-fala 3s ease-in-out infinite; }
+.vx-fala-b { animation-delay: -1.5s; }
+@media (prefers-reduced-motion: reduce) {
+  .vx-andar, .vx-passo, .vx-gesto, .vx-fala { animation: none !important; }
+}
+
+/* Personagens realistas: vira ao voltar (sincronizado com vx-andar), passada leve e respiração */
+@keyframes vx-virar { 0%, 49.9% { scale: 1 1; } 50%, 100% { scale: -1 1; } }
+@keyframes vx-ciclo { to { translate: -100% 0; } }
+@keyframes vx-respiro { 0%, 100% { scale: 1 1; } 50% { scale: 1 1.008; } }
+.vx-virar { animation: vx-virar 12s step-end infinite; }
+.vx-ciclo { animation: vx-ciclo 1.15s steps(8) infinite; }
+.vx-respiro { transform-origin: 50% 100%; animation: vx-respiro 4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .vx-virar, .vx-ciclo, .vx-respiro { animation: none !important; }
+}

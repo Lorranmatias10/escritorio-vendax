@@ -13,17 +13,17 @@ export const ANDARES = [
   { numero: 1, nome: '1º andar' },
 ] as const;
 
-// r = retângulo da sala na imagem do prédio (px de public/escritorio.png, 1536x1024)
+// r = retângulo da sala na imagem do prédio (px de public/escritorio-predio.png, 1536x1024)
 export const DEPARTAMENTOS = [
-  { id: 'direcao',     andar: 5, nome: 'Direção e Qualidade',         responsavel: 'Tiago',                                   fila: 'Prioridades, critérios de aceite e decisões estratégicas', r: [228, 75, 1057, 165] },
-  { id: 'comercial',   andar: 4, nome: 'Comercial e Novos Negócios',  responsavel: 'Tiago',                                   fila: 'Quem pode contratar a Vendax',                             r: [228, 262, 547, 168] },
-  { id: 'marketing',   andar: 4, nome: 'Marketing da Vendax',         responsavel: 'Tiago',                                   fila: 'Demanda e autoridade da marca',                            r: [778, 262, 507, 168] },
-  { id: 'contas',      andar: 3, nome: 'Gestão de Contas e Entrega',  responsavel: 'Tiago (relacionamento e escopo) · Fabiana (coordenação)', fila: 'Contas, escopo, pendências e riscos por cliente', r: [228, 450, 542, 145] },
-  { id: 'atendimento', andar: 3, nome: 'Atendimento e Conversão',     responsavel: 'Lígia (operação) · Fabiana (acompanhamento) · Tiago (estratégia)', fila: 'Leads e pacientes do cliente autorizado', r: [775, 450, 510, 145] },
-  { id: 'performance', andar: 2, nome: 'Performance e Web',           responsavel: 'Tiago (estratégia e verba) · Lorran (integrações e aceite técnico)', fila: 'Mídia, dados, atribuição e web', r: [228, 615, 362, 155] },
-  { id: 'whatsapp',    andar: 2, nome: 'WhatsApp, Automação e IA',    responsavel: 'Lorran',                                  fila: 'Operação de WhatsApp, fluxos e bases de IA dos clientes',   r: [595, 615, 325, 155] },
-  { id: 'produto',     andar: 2, nome: 'Produto e Engenharia',        responsavel: 'Tiago (prioridade) · Lorran (validação e publicação)', fila: 'Vendax App: backlog, QA e integrações', r: [925, 615, 360, 155] },
-  { id: 'financeiro',  andar: 1, nome: 'Financeiro e Administrativo', responsavel: 'Fabiana (alçada combinada com Tiago)',    fila: 'Faturamento, conciliação e contratos · acesso restrito',   r: [228, 795, 1057, 165] },
+  { id: 'direcao',     andar: 5, nome: 'Direção e Qualidade',         responsavel: 'Tiago',                                   fila: 'Prioridades, critérios de aceite e decisões estratégicas', r: [180, 95, 1078, 177] },
+  { id: 'comercial',   andar: 4, nome: 'Comercial e Novos Negócios',  responsavel: 'Tiago',                                   fila: 'Quem pode contratar a Vendax',                             r: [180, 292, 570, 163] },
+  { id: 'marketing',   andar: 4, nome: 'Marketing da Vendax',         responsavel: 'Tiago',                                   fila: 'Demanda e autoridade da marca',                            r: [760, 292, 498, 163] },
+  { id: 'contas',      andar: 3, nome: 'Gestão de Contas e Entrega',  responsavel: 'Tiago (relacionamento e escopo) · Fabiana (coordenação)', fila: 'Contas, escopo, pendências e riscos por cliente', r: [180, 475, 445, 140] },
+  { id: 'atendimento', andar: 3, nome: 'Atendimento e Conversão',     responsavel: 'Lígia (operação) · Fabiana (acompanhamento) · Tiago (estratégia)', fila: 'Leads e pacientes do cliente autorizado', r: [668, 475, 590, 140] },
+  { id: 'performance', andar: 2, nome: 'Performance e Web',           responsavel: 'Tiago (estratégia e verba) · Lorran (integrações e aceite técnico)', fila: 'Mídia, dados, atribuição e web', r: [180, 645, 360, 125] },
+  { id: 'whatsapp',    andar: 2, nome: 'WhatsApp, Automação e IA',    responsavel: 'Lorran',                                  fila: 'Operação de WhatsApp, fluxos e bases de IA dos clientes',   r: [572, 645, 328, 125] },
+  { id: 'produto',     andar: 2, nome: 'Produto e Engenharia',        responsavel: 'Tiago (prioridade) · Lorran (validação e publicação)', fila: 'Vendax App: backlog, QA e integrações', r: [935, 645, 323, 125] },
+  { id: 'financeiro',  andar: 1, nome: 'Financeiro e Administrativo', responsavel: 'Fabiana (alçada combinada com Tiago)',    fila: 'Faturamento, conciliação e contratos · acesso restrito',   r: [180, 800, 1078, 165] },
 ] as const;
 
 export type DepartamentoId = (typeof DEPARTAMENTOS)[number]['id'];

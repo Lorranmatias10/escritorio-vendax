@@ -6,7 +6,7 @@ import { abrirBanco, type Banco } from './db';
 import { carregarUsuario, SemAcesso, type Usuario } from './escopo';
 import { PAPEIS_PILOTO } from './catalogo';
 import { lerCatalogoInstrucoes } from './instrucoes';
-import { receberEventoReuniao, processarFila, decidirAprovacao, enfileirar, registrarConfiguracao } from './orquestracao';
+import { receberEventoReuniao, receberPedido, processarFila, decidirAprovacao, enfileirar, registrarConfiguracao, type PedidoPapel } from './orquestracao';
 import { reuniaoPiloto, simularFonteAusente, tarefaDemo } from './demo';
 import { listarAprovacoes, listarTarefas, obterPapel, obterTarefa, salas } from './dados';
 import { adaptadorConfigurado, type SaidaAgente } from './ia';
@@ -127,6 +127,151 @@ async function rodarCasos(sb: Banco): Promise<Resultado[]> {
   add('Piloto com execução de AM, Auditor e Diretor', caso7, { etapas: ex7.map(e => `${e.papel_id}:${e.etapa}:v${e.versao_instrucao}`) });
   // Ordem da tabela do arquivo de instruções
   return Object.keys(casos).map(c => r.find(x => x.caso === c) ?? { caso: c, esperado: casos[c], passou: false, evidencia: { motivo: 'caso não implementado' } });
+}
+
+// ---------- Fase 2: um caso normal, um com dado ausente, uma duplicidade e um fora de permissão por fluxo ----------
+type Cenario = {
+  papel: string; cliente_id: string | null; area_interna: string | null; dono: string; objetivo: string;
+  fontes: { fonte: string; texto: string }[]; ausente: { fonte: string; resolve: string };
+  fora: { usuario: string; cliente_id: string | null; area_interna: string | null }; // quem pede o que não pode ver
+};
+// Contas e dados fictícios. Permissões da demonstração: Fabiana (Aurora, Sorriso, financeiro), Lígia (Aurora), Lorran (Sorriso).
+export const CENARIOS_FASE_2: Cenario[] = [
+  { papel: 'sdr_followup', cliente_id: null, area_interna: 'comercial', dono: 'tiago', objetivo: 'Follow-up do lead fictício Clínica Horizonte',
+    fontes: [{ fonte: 'CRM Vendax', texto: 'Lead fictício: Clínica Horizonte. Origem: indicação. Última interação há 9 dias: pediu proposta de tráfego pago. Estágio: diagnóstico.' }],
+    ausente: { fonte: 'Agenda comercial (Google Workspace)', resolve: 'Lorran (integrações)' },
+    fora: { usuario: 'lorran', cliente_id: 'aurora', area_interna: null } },
+  { papel: 'propostas_negociacao', cliente_id: null, area_interna: 'comercial', dono: 'tiago', objetivo: 'Proposta para o lead fictício Clínica Horizonte',
+    fontes: [{ fonte: 'Diagnóstico comercial', texto: 'Necessidade: mais agendamentos de implantes. Escopo desejado: tráfego pago e atendimento no WhatsApp.' }],
+    ausente: { fonte: 'Tabela de preços vigente', resolve: 'Tiago' },
+    fora: { usuario: 'ligia', cliente_id: 'sorriso', area_interna: null } },
+  { papel: 'copiloto_atendimento', cliente_id: 'aurora', area_interna: null, dono: 'ligia', objetivo: 'Sugerir resposta ao Paciente fictício 07',
+    fontes: [{ fonte: 'Conversa em análise (WhatsApp)', texto: 'Paciente fictício 07: Oi, queria saber se tem horário para avaliação de implante na semana que vem.' }],
+    ausente: { fonte: 'Agenda da clínica', resolve: 'Lorran (integrações)' },
+    fora: { usuario: 'lorran', cliente_id: 'aurora', area_interna: null } },
+  { papel: 'dados_atribuicao', cliente_id: 'sorriso', area_interna: null, dono: 'lorran', objetivo: 'Atribuição de agendamentos de outubro',
+    fontes: [{ fonte: 'Meta Ads', texto: 'Outubro: 40 leads de formulário.' }, { fonte: 'CRM de atendimento', texto: 'Outubro: 18 agendamentos, 11 com origem Meta Ads.' }],
+    ausente: { fonte: 'Relatório mensal (Reportei)', resolve: 'Lorran (integrações)' },
+    fora: { usuario: 'ligia', cliente_id: 'sorriso', area_interna: null } },
+  { papel: 'monitor_whatsapp', cliente_id: 'sorriso', area_interna: null, dono: 'lorran', objetivo: 'Investigar queda de entrega no número principal',
+    fontes: [{ fonte: 'Log de envios', texto: 'Ontem: 120 envios, 87 entregues. Anteontem: 118 envios, 115 entregues. Template de lembrete com status pausado desde ontem 14h.' }],
+    ausente: { fonte: 'Status da BM e do número', resolve: 'Lorran (integrações)' },
+    fora: { usuario: 'ligia', cliente_id: 'sorriso', area_interna: null } },
+  { papel: 'faturamento_cobranca', cliente_id: null, area_interna: 'financeiro', dono: 'fabiana', objetivo: 'Conferir a fatura de novembro do cliente fictício Aurora',
+    fontes: [{ fonte: 'Contrato vigente', texto: 'Cliente fictício Aurora: mensalidade de R$ 3.000, vencimento dia 10.' }],
+    ausente: { fonte: 'Asaas (faturas e pagamentos)', resolve: 'Lorran (integrações)' },
+    fora: { usuario: 'ligia', cliente_id: null, area_interna: 'financeiro' } },
+];
+export const PAPEIS_FASE_2 = CENARIOS_FASE_2.map(c => c.papel);
+const ESPERADO_FASE_2: Record<string, string> = {
+  'Caso normal': 'O papel prepara o rascunho com fontes e condição de conclusão; o dono revisa e nenhuma ação externa roda.',
+  'Dado ausente': 'A tarefa fica bloqueada, com a lacuna e quem pode resolver.',
+  'Duplicidade': 'O mesmo pedido recebido duas vezes mantém uma tarefa, uma execução e uma aprovação.',
+  'Fora de permissão': 'O sistema bloqueia o pedido e a leitura de quem não tem acesso ao cliente ou à área.',
+};
+
+async function rodarCasosFase2(sb: Banco): Promise<(Resultado & { papel: string })[]> {
+  const u = async (id: string) => (await carregarUsuario(sb, id)) as Usuario;
+  await sb.query(`update papeis set estado_config = 'em_homologacao' where id = any($1::text[])`, [PAPEIS_FASE_2]);
+  const r: (Resultado & { papel: string })[] = [];
+  for (const c of CENARIOS_FASE_2) {
+    const [{ nome }] = await sb.query<{ nome: string }>('select nome from papeis where id = $1', [c.papel]);
+    const add = (caso: string, ev: ReturnType<typeof checar>, extra: Record<string, unknown> = {}) =>
+      r.push({ papel: c.papel, caso: `${nome} · ${caso}`, esperado: ESPERADO_FASE_2[caso], passou: ev.passou, evidencia: { ...ev.verificacoes, ...extra } });
+    const dono = await u(c.dono);
+    const pedido = (id: string, fontes: PedidoPapel['conteudo_recuperado']) => ({
+      id, papel_id: c.papel, cliente_id: c.cliente_id, area_interna: c.area_interna, dono_id: c.dono, objetivo: c.objetivo, conteudo_recuperado: fontes, demo: true });
+
+    try {
+      // Normal (e, na sequência, duplicidade do mesmo pedido)
+      const ped = pedido(`homolog-f2-${c.papel}`, c.fontes);
+      const { tarefaId } = await receberPedido(sb, dono, ped);
+      await processarFila(sb);
+      const ex = await saidas(sb, tarefaId);
+      const t = (await obterTarefa(sb, dono, tarefaId))!;
+      const [ap] = t.aprovacoes;
+      const dec = ap ? await decidirAprovacao(sb, dono, ap.id, 'aprovada', 'Homologação fase 2') : null;
+      const tDec = (await obterTarefa(sb, dono, tarefaId))!;
+      add('Caso normal', checar({
+        papel_executou: ex.length === 1 && ex[0].estado === 'concluida' && ex[0].papel_id === c.papel,
+        rascunho_registrado: t.evidencias.some(e => e.tipo === 'rascunho'),
+        com_fonte_e_condicao_de_conclusao: (ex[0]?.saida?.fontes.length ?? 0) > 0 && !!ex[0]?.saida?.condicao_conclusao,
+        instrucao_versionada: ex[0]?.versao_instrucao !== null,
+        revisao_do_dono: t.estado === 'aguardando_aprovacao' && ap?.aprovador_id === c.dono,
+        nenhum_efeito_confirmado_em_A1: ex[0]?.saida?.efeito_confirmado === null,
+        execucao_externa_desabilitada: dec?.externa === 'desabilitada_v1' && tDec.eventos.some(e => e.tipo === 'acao_externa_bloqueada'),
+      }), { tarefa: tarefaId, resumo: ex[0]?.saida?.resumo });
+
+      const rep = await receberPedido(sb, dono, ped);
+      await processarFila(sb);
+      const [{ n }] = await sb.query<{ n: number }>('select count(*)::int n from tarefas where origem_evento_id = $1', [ped.id]);
+      const t2 = (await obterTarefa(sb, dono, tarefaId))!;
+      add('Duplicidade', checar({
+        mesma_tarefa: rep.tarefaId === tarefaId && rep.repetido, um_registro: n === 1,
+        uma_execucao: (await saidas(sb, tarefaId)).length === 1, uma_aprovacao: t2.aprovacoes.length === 1,
+        historico_registra_repeticao: t2.eventos.some(e => e.tipo === 'evento_repetido'),
+      }));
+
+      // Dado ausente
+      const aus = await receberPedido(sb, dono, pedido(`homolog-f2-${c.papel}-ausente`, [...c.fontes, { ...c.ausente, texto: '', disponivel: false }]));
+      await processarFila(sb);
+      const t3 = (await obterTarefa(sb, dono, aus.tarefaId))!;
+      add('Dado ausente', checar({
+        tarefa_bloqueada: t3.estado === 'bloqueada',
+        aponta_lacuna_e_quem_resolve: (t3.motivo_bloqueio ?? '').includes(`${c.ausente.fonte}: Integração pendente — quem resolve: ${c.ausente.resolve}`),
+        sem_aprovacao_aberta: t3.aprovacoes.length === 0,
+      }), { motivo: t3.motivo_bloqueio });
+
+      // Fora de permissão
+      const fora = await u(c.fora.usuario);
+      let pedidoBloqueado = false;
+      try { await receberPedido(sb, fora, { ...pedido(`homolog-f2-${c.papel}-fora`, c.fontes), cliente_id: c.fora.cliente_id, area_interna: c.fora.area_interna }); }
+      catch (e) { pedidoBloqueado = e instanceof SemAcesso; }
+      const doFora = (c.fora.cliente_id === c.cliente_id && c.fora.area_interna === c.area_interna) ? tarefaId : null;
+      add('Fora de permissão', checar({
+        pedido_bloqueado: pedidoBloqueado,
+        nenhuma_tarefa_criada: (await sb.query('select 1 from tarefas where origem_evento_id = $1', [`homolog-f2-${c.papel}-fora`])).length === 0,
+        leitura_bloqueada: doFora === null || (await obterTarefa(sb, fora, doFora)) === null,
+        busca_sem_o_registro: doFora === null || (await listarTarefas(sb, fora)).every(x => x.id !== doFora),
+      }), { usuario: fora.nome });
+    } catch (e) {
+      add('Caso normal', checar({ execucao: false }), { erro: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  return r;
+}
+
+export async function homologarFase2(b: Banco, u: Usuario) {
+  if (u.perfil !== 'admin') throw new SemAcesso('Somente a direção homologa papéis.');
+  const versao = lerCatalogoInstrucoes().at(-1)!.versao;
+  const provedor = adaptadorConfigurado().provedor;
+  const rodada = randomUUID();
+  const sb = await abrirBanco({ isolado: true });
+  let resultados: (Resultado & { papel: string })[];
+  try { resultados = await rodarCasosFase2(sb); }
+  catch (e) { resultados = PAPEIS_FASE_2.map(papel => ({ papel, caso: 'Execução da homologação', esperado: 'Todos os casos rodam', passou: false, evidencia: { erro: e instanceof Error ? e.message : String(e) } })); }
+  finally { await sb.fechar(); }
+
+  // Cada fluxo é liberado sozinho: o papel só é habilitado se os seus 4 casos passarem.
+  const aprovados: string[] = [];
+  await b.transacao(async q => {
+    for (const x of resultados)
+      await q.query('insert into homologacoes (rodada, versao, caso, esperado, papeis, passou, evidencia, executado_por) values ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [rodada, versao, x.caso, x.esperado, [x.papel], x.passou, { ...x.evidencia, provedor }, u.id]);
+    for (const p of PAPEIS_FASE_2) {
+      const dele = resultados.filter(x => x.papel === p);
+      if (dele.length === 4 && dele.every(x => x.passou)) {
+        aprovados.push(p);
+        await q.query(`update instrucoes set estado = 'aprovada' where papel_id = $1 and versao = $2`, [p, versao]);
+        await q.query(`update papeis set versao_instrucao = $2, estado_config = 'habilitado', execucao_habilitada = true, modo = 'A1', homologado_com = $3 where id = $1`, [p, versao, provedor]);
+        await registrarConfiguracao(q, p, 'habilitado', `Fase 2 homologada em A1 com ${provedor} (instrução v${versao}, rodada ${rodada.slice(0, 8)}: 4/4 casos).`, u.nome);
+      } else {
+        await q.query(`update papeis set estado_config = 'desabilitado', execucao_habilitada = false, homologado_com = null where id = $1`, [p]);
+        await registrarConfiguracao(q, p, 'homologacao_reprovada', `Fase 2, rodada ${rodada.slice(0, 8)} com ${provedor}: ${dele.filter(x => !x.passou).map(x => x.caso).join('; ') || 'sem casos'}.`, u.nome);
+      }
+    }
+  });
+  return { rodada, versao, provedor, aprovado: aprovados.length === PAPEIS_FASE_2.length, aprovados, resultados };
 }
 
 export async function homologarPiloto(b: Banco, u: Usuario) {

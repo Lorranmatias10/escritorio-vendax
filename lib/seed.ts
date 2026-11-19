@@ -28,8 +28,8 @@ export async function sincronizarCatalogo(q: Q) {
 const dia = 86_400_000;
 const em = (dias: number, hora = 18) => { const d = new Date(Date.now() + dias * dia); d.setUTCHours(hora + 3, 0, 0, 0); return d.toISOString(); }; // hora em São Paulo (UTC-3)
 
-// Dados sintéticos de demonstração. Nenhum paciente real: só "Paciente fictício NN".
-export async function semearDemonstracao(q: Q) {
+// Equipe real da Vendax (sem e-mail e sem senha: o acesso é liberado em Usuários).
+export async function semearEquipe(q: Q) {
   const usuarios = [
     ['tiago', 'Tiago', 'admin', true],
     ['fabiana', 'Fabiana', 'equipe', true],
@@ -37,6 +37,12 @@ export async function semearDemonstracao(q: Q) {
     ['lorran', 'Lorran', 'equipe', false],
   ] as const;
   for (const u of usuarios) await q.query('insert into usuarios (id, nome, perfil, pode_financeiro) values ($1,$2,$3,$4) on conflict (id) do nothing', [...u]);
+}
+
+// Dados sintéticos: SÓ para a homologação (banco isolado em memória) e para os testes automatizados.
+// Nunca entram no banco principal. Nenhum paciente real: só "Paciente fictício NN".
+export async function semearDemonstracao(q: Q) {
+  await semearEquipe(q);
   const clientes = [['aurora', 'Clínica Aurora'], ['sorriso', 'Instituto Sorriso Pleno'], ['vita', 'Dermato Vita']] as const;
   for (const c of clientes) await q.query('insert into clientes (id, nome, demo) values ($1,$2,true) on conflict (id) do nothing', [...c]);
   for (const [u, c] of [['fabiana', 'aurora'], ['fabiana', 'sorriso'], ['ligia', 'aurora'], ['lorran', 'sorriso']])
@@ -73,7 +79,25 @@ export async function semearDemonstracao(q: Q) {
   for (const x of incidentes) await q.query('insert into incidentes (cliente_id, area_interna, titulo, severidade, estado, demo) values ($1,$2,$3,$4,$5,true)', x);
 }
 
-// Apaga o que é de demonstração e semeia de novo. Não toca no catálogo nem em instruções.
+// Remove do banco principal tudo o que foi marcado como demonstração (clientes, tarefas e o que depende delas).
+// Idempotente: roda a cada inicialização. Catálogo, instruções, equipe e histórico de homologação ficam.
+export async function limparDemonstracao(b: Banco) {
+  await b.transacao(async q => {
+    const demo = `select id from tarefas where demo or cliente_id in (select id from clientes where demo)`;
+    await q.query(`delete from aprovacoes where demo or tarefa_id in (${demo})`);
+    await q.query(`delete from evidencias where tarefa_id in (${demo})`);
+    await q.query(`delete from execucoes where demo or tarefa_id in (${demo})`);
+    await q.query(`delete from eventos_tarefa where tarefa_id in (${demo})`);
+    await q.query(`delete from entregas where demo or cliente_id in (select id from clientes where demo)`);
+    await q.query(`delete from incidentes where demo or cliente_id in (select id from clientes where demo)`);
+    await q.query(`update tarefas set parent_id = null where parent_id in (${demo})`);
+    await q.query(`delete from tarefas where id in (${demo})`);
+    await q.query('delete from permissoes_cliente where cliente_id in (select id from clientes where demo)');
+    await q.query('delete from clientes where demo');
+  });
+}
+
+// Testes: apaga o que é de demonstração e semeia de novo. Não toca no catálogo nem em instruções.
 export async function resetarDemonstracao(b: Banco) {
   await b.transacao(async q => {
     await q.query('delete from aprovacoes'); await q.query('delete from evidencias'); await q.query('delete from execucoes');
@@ -102,9 +126,11 @@ export async function importarInstrucoes(q: Q) {
                  and exists (select 1 from instrucoes i where i.papel_id = papeis.id)`);
 }
 
-export async function prepararDados(b: Banco) {
+// demo = banco isolado da homologação ou dos testes. O banco principal recebe só a equipe e o catálogo.
+export async function prepararDados(b: Banco, { demo = false } = {}) {
   await sincronizarCatalogo(b);
   const [{ n }] = await b.query<{ n: number }>('select count(*)::int as n from usuarios');
-  if (n === 0) await b.transacao(q => semearDemonstracao(q));
+  if (n === 0) await b.transacao(q => (demo ? semearDemonstracao(q) : semearEquipe(q)));
+  if (!demo) await limparDemonstracao(b);
   await importarInstrucoes(b);
 }

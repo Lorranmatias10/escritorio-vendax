@@ -58,14 +58,15 @@ async function migrar(b: Banco) {
 
 const g = globalThis as unknown as { __vxBanco?: Promise<Banco> };
 
-// Abre um banco pronto (migrado, catálogo sincronizado, instruções importadas, demonstração semeada).
+// Abre um banco pronto (migrado, catálogo sincronizado, instruções importadas).
+// Dados fictícios só no banco isolado (homologação) ou em memória (testes); o principal fica limpo.
 // isolado = Postgres em memória, descartável: usado pela homologação para não tocar nos dados reais.
 export async function abrirBanco({ isolado = false } = {}): Promise<Banco> {
   const b = !isolado && process.env.DATABASE_URL
     ? await abrirPostgres(process.env.DATABASE_URL)
     : await abrirPglite(isolado || process.env.VX_DB === 'memoria');
   await migrar(b);
-  await prepararDados(b);
+  await prepararDados(b, { demo: isolado || process.env.VX_DB === 'memoria' });
   return b;
 }
 

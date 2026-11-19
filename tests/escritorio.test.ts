@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { banco, type Banco } from '@/lib/db';
 import { carregarUsuario, type Usuario } from '@/lib/escopo';
-import { resetarDemonstracao } from '@/lib/seed';
+import { resetarDemonstracao, limparDemonstracao } from '@/lib/seed';
 import { dispararFluxoPiloto, simularFalha, simularFonteAusente } from '@/lib/demo';
-import { decidirAprovacao, retomarExecucao, desabilitarPapel } from '@/lib/orquestracao';
-import { homologarPiloto } from '@/lib/homologacao';
+import { decidirAprovacao, retomarExecucao, desabilitarPapel, criarCliente, definirAcessoClientes } from '@/lib/orquestracao';
+import { homologarPiloto, homologarFase2, PAPEIS_FASE_2 } from '@/lib/homologacao';
 import { lerCatalogoInstrucoes } from '@/lib/instrucoes';
-import { catalogo, hoje, listarAprovacoes, listarTarefas, obterTarefa, salas, listarIncidentes, obterPapel } from '@/lib/dados';
+import { catalogo, hoje, listarAprovacoes, listarTarefas, obterTarefa, salas, listarIncidentes, obterPapel, conversasRecentes } from '@/lib/dados';
 import { PAPEIS, PAPEIS_PILOTO } from '@/lib/catalogo';
 
 let b: Banco;
@@ -204,6 +204,62 @@ describe('homologação e habilitação do piloto', () => {
     const [reg] = await b.query<{ acao: string; ator: string; detalhe: string }>(`select acao, ator, detalhe from registro_configuracao where papel_id = 'gerente_contas' order by id desc limit 1`);
     expect(reg).toEqual({ acao: 'desabilitado', ator: 'Tiago', detalhe: 'Teste de desligamento' });
   });
+});
+
+describe('dados reais: clientes e acesso', () => {
+  it('a limpeza tira do banco principal tudo o que é demonstração e mantém equipe e catálogo', async () => {
+    await limparDemonstracao(b);
+    const [{ c }] = await b.query<{ c: number }>('select count(*)::int c from clientes');
+    const [{ t }] = await b.query<{ t: number }>('select count(*)::int t from tarefas');
+    const [{ p }] = await b.query<{ p: number }>('select count(*)::int p from papeis');
+    expect([c, t, p]).toEqual([0, 0, 23]);
+    expect((await b.query('select id from usuarios')).length).toBe(4);
+  });
+
+  it('só a direção cadastra cliente e define acesso; quem recebe acesso passa a ver o cliente', async () => {
+    await limparDemonstracao(b);
+    await expect(criarCliente(b, await u('fabiana'), 'Clínica Teste')).rejects.toThrow(/direção/);
+    const id = await criarCliente(b, await u('tiago'), '  Clínica  São João ');
+    expect(id).toBe('clinica-sao-joao');
+    await expect(criarCliente(b, await u('tiago'), 'clínica são joão')).rejects.toThrow(/Já existe/);
+    await expect(definirAcessoClientes(b, await u('lorran'), 'ligia', [id])).rejects.toThrow(/direção/);
+    await definirAcessoClientes(b, await u('tiago'), 'ligia', [id, 'inexistente']);
+    expect((await u('ligia')).clientes).toEqual([id]);
+    expect((await u('lorran')).clientes).toEqual([]);
+  });
+});
+
+describe('comunicação entre agentes no prédio', () => {
+  it('cada passagem de tarefa vira uma conversa de quem concluiu para o destino, com o mesmo escopo', async () => {
+    await homologarPiloto(b, await u('tiago')); // estado conhecido: outro teste desabilita o Gerente de Contas
+    await dispararFluxoPiloto(b, await u('tiago'));
+    const c = await conversasRecentes(b, await u('tiago'));
+    expect(c.map(x => `${x.de}>${x.para}`).sort()).toEqual(['auditor_qualidade>diretor_operacoes', 'gerente_contas>auditor_qualidade']);
+    expect(await conversasRecentes(b, await u('lorran'))).toEqual([]); // Lorran não vê a Clínica Aurora
+  });
+});
+
+describe('homologação da fase 2', () => {
+  it('só a direção homologa', async () => {
+    await expect(homologarFase2(b, await u('fabiana'))).rejects.toThrow(/direção/);
+  });
+
+  it('4 casos por fluxo passam, os 6 papéis ficam habilitados em A1 e nada vaza para os dados principais', async () => {
+    const r = await homologarFase2(b, await u('tiago'));
+    expect(r.resultados.filter(x => !x.passou)).toEqual([]);
+    expect(r.resultados).toHaveLength(24);
+    expect(r.aprovados.sort()).toEqual([...PAPEIS_FASE_2].sort());
+    const c = await catalogo(b);
+    for (const p of c.papeis.filter(p => PAPEIS_FASE_2.includes(p.id)))
+      expect([p.estado_config, p.execucao_habilitada, p.modo, p.versao_instrucao]).toEqual(['habilitado', true, 'A1', '1.0']);
+    expect(c.papeis.filter(p => p.fase === 'fase_3').every(p => !p.execucao_habilitada)).toBe(true);
+    const [{ h }] = await b.query<{ h: number }>(`select count(*)::int h from tarefas where origem_evento_id like 'homolog-%'`);
+    expect(h).toBe(0);
+    // A página do papel mostra só os 4 casos dele
+    const papel = (await obterPapel(b, await u('tiago'), 'monitor_whatsapp'))!;
+    expect(papel.homologacao?.casos).toHaveLength(4);
+  });
+
 });
 
 describe('login próprio', () => {

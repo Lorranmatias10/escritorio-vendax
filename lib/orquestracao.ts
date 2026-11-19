@@ -96,6 +96,39 @@ export async function receberEventoReuniao(b: Banco, u: Usuario, ev: EventoReuni
   });
 }
 
+// ---------- Pedido a um papel (entrada genérica dos fluxos da fase 2) ----------
+// Um pedido = uma tarefa do papel, etapa "analisar" em A1: o papel prepara o rascunho e o dono humano revisa (aprovação).
+export type PedidoPapel = {
+  id: string; papel_id: string; cliente_id: string | null; area_interna: string | null; dono_id: string; objetivo: string;
+  conteudo_recuperado: EntradaAgente['conteudo_recuperado']; demo: boolean;
+};
+
+export async function receberPedido(b: Banco, u: Usuario, p: PedidoPapel) {
+  if (!podeVer(u, p.cliente_id, p.area_interna)) throw new SemAcesso('Sem acesso ao cliente ou à área deste pedido.');
+  return b.transacao(async q => {
+    const [existente] = await q.query<{ id: string; origem_recebimentos: number }>('select id, origem_recebimentos from tarefas where origem_evento_id = $1', [p.id]);
+    if (existente) {
+      const n = existente.origem_recebimentos + 1;
+      await q.query('update tarefas set origem_recebimentos = $2, atualizado_em = now() where id = $1', [existente.id, n]);
+      await registrarEvento(q, existente.id, 'evento_repetido', `Pedido de origem recebido de novo (${n}ª vez). Nenhum registro duplicado.`, u.nome, { origem: p.id });
+      return { tarefaId: existente.id, repetido: true };
+    }
+    const depto = await deptoDoPapel(q, p.papel_id);
+    const [dono] = await q.query<{ nome: string }>('select nome from usuarios where id = $1', [p.dono_id]);
+    const [t] = await q.query<{ id: string }>(
+      `insert into tarefas (cliente_id, area_interna, departamento_id, papel_atual_id, dono_humano_id, objetivo, fonte, origem_evento_id, estado, demo, criterio_conclusao, proximo_passo)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,'na_fila',$9,'Dono humano revisou o rascunho do papel','Papel prepara o rascunho') returning id`,
+      [p.cliente_id, p.area_interna, depto, p.papel_id, p.dono_id, p.objetivo, `Pedido ${p.id}${p.demo ? ' · Demonstração' : ''}`, p.id, p.demo]);
+    await registrarEvento(q, t.id, 'criada', `Tarefa criada a partir do pedido ${p.id}.`, u.nome);
+    await enfileirar(q, t.id, p.papel_id, 'analisar', {
+      papel_id: p.papel_id, etapa: 'analisar',
+      instrucao_operacional: `${p.objetivo}. Prepare a entrega do seu papel como rascunho para revisão. Não envie nada.`,
+      conteudo_recuperado: p.conteudo_recuperado, contexto: { dono_nome: dono?.nome },
+    }, p.demo);
+    return { tarefaId: t.id, repetido: false };
+  });
+}
+
 // ---------- Executor (sob demanda; sem serviço permanente por especialista) ----------
 export async function processarFila(b: Banco, adaptador: AdaptadorModelo = adaptadorConfigurado(), limite = 25) {
   const feitas: string[] = [];
@@ -117,7 +150,8 @@ async function executar(b: Banco, ex: ExecRow, adaptador: AdaptadorModelo) {
   // Habilitado = homologado. Antes disso, só o piloto roda, e só em demonstração. Papel desabilitado nunca roda.
   // A habilitação vale para o provedor/modelo homologado; outro provedor só roda em demonstração.
   const homologadoAqui = papel.execucao_habilitada && papel.homologado_com === adaptador.provedor;
-  const podeRodar = homologadoAqui || (ex.demo && papel.fase === 'piloto' && papel.estado_config !== 'desabilitado');
+  // Fases posteriores rodam em demonstração só enquanto estão em homologação (banco isolado da homologação).
+  const podeRodar = homologadoAqui || (ex.demo && (papel.fase === 'piloto' ? papel.estado_config !== 'desabilitado' : papel.estado_config === 'em_homologacao'));
   if (!podeRodar) {
     const msg = papel.execucao_habilitada && papel.homologado_com !== adaptador.provedor
       ? `${papel.nome} foi homologado com ${papel.homologado_com ?? 'outro provedor'}; o provedor atual é ${adaptador.provedor}. Rode a homologação de novo.`
@@ -215,7 +249,16 @@ async function aplicarEfeitos(q: Q, ex: ExecRow, s: SaidaAgente, papel: Papel) {
        { canal: 'whatsapp', destinatario: 'Contato fictício da Clínica Aurora', mensagem: s.rascunho, envio: 'imediato após aprovação' },
        prazo, pai.dono_humano_id, pai.demo]);
     await registrarEvento(q, pai.id, 'em_hoje', `Briefing priorizado e colocado em Hoje. Quem decide: ${s.responsavel_humano}.`, 'diretor_operacoes');
-  } else if (ex.etapa === 'consultar_fonte') {
+  } else if (ex.etapa === 'analisar' && !ex.entrada.conteudo_recuperado.some(c => c.disponivel === false)) {
+    // A1: o rascunho fica como evidência e o dono humano revisa. Nenhuma ação externa.
+    // Bloqueio por fonte ausente vem do que o sistema entregou; lacunas que o modelo apontar ficam no rascunho para o revisor.
+    await q.query(`update tarefas set estado = 'aguardando_aprovacao', motivo_bloqueio = null, proximo_passo = $2, atualizado_em = now() where id = $1`, [t.id, s.proxima_acao]);
+    await q.query(
+      `insert into aprovacoes (tarefa_id, chave_dedup, intencao, alvo, conta, parametros, prazo, aprovador_id, demo)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (chave_dedup) do nothing`,
+      [t.id, `${t.id}:aprovacao:revisar`, `Revisar o rascunho de ${papel.nome}`, 'Revisão interna', 'Escritório Vendax',
+       { rascunho: s.rascunho ?? s.resumo, papel_destino: s.papel_destino }, new Date(Date.now() + 2 * 86_400_000).toISOString(), t.dono_humano_id, t.demo]);
+  } else if (ex.etapa === 'consultar_fonte' || ex.etapa === 'analisar') { // analisar com fonte ausente: bloqueia e aponta quem resolve
     await q.query(`update tarefas set estado = 'bloqueada', motivo_bloqueio = $2, proximo_passo = $3, atualizado_em = now() where id = $1`,
       [t.id, s.lacunas.join(' · '), s.proxima_acao]);
     await registrarEvento(q, t.id, 'fonte_ausente', `Fonte indisponível: ${s.lacunas.join(' · ')}`, ex.papel_id);
@@ -268,6 +311,31 @@ export async function salvarInstrucao(b: Banco, u: Usuario, papelId: string, ver
   if (u.perfil !== 'admin') throw new SemAcesso('Somente a direção registra instruções.');
   await b.query(`insert into instrucoes (papel_id, versao, conteudo, autor_id) values ($1,$2,$3,$4)
                  on conflict (papel_id, versao) do update set conteudo = excluded.conteudo where instrucoes.estado = 'rascunho'`, [papelId, versao, conteudo, u.id]);
+}
+
+// ---------- Clientes e acesso ----------
+// Só a direção cadastra clientes e define quem da equipe vê cada um (a direção vê todos).
+const slug = (t: string) => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48);
+
+export async function criarCliente(b: Banco, u: Usuario, nome: string) {
+  if (u.perfil !== 'admin') throw new SemAcesso('Somente a direção cadastra clientes.');
+  const limpo = nome.trim().replace(/\s+/g, ' ');
+  if (limpo.length < 2) throw new Error('Informe o nome do cliente.');
+  const base = slug(limpo) || 'cliente';
+  const existentes = await b.query<{ id: string; nome: string }>('select id, nome from clientes where id = $1 or id like $2 or lower(nome) = lower($3)', [base, `${base}-%`, limpo]);
+  if (existentes.some(c => c.nome.toLowerCase() === limpo.toLowerCase())) throw new Error(`Já existe um cliente chamado ${limpo}.`);
+  const id = existentes.some(c => c.id === base) ? `${base}-${existentes.length + 1}` : base;
+  await b.query('insert into clientes (id, nome, demo) values ($1, $2, false)', [id, limpo]);
+  return id;
+}
+
+export async function definirAcessoClientes(b: Banco, u: Usuario, usuarioId: string, clientes: string[]) {
+  if (u.perfil !== 'admin') throw new SemAcesso('Somente a direção define acessos.');
+  await b.transacao(async q => {
+    const validos = (await q.query<{ id: string }>('select id from clientes where id = any($1::text[])', [clientes])).map(c => c.id);
+    await q.query('delete from permissoes_cliente where usuario_id = $1', [usuarioId]);
+    for (const c of validos) await q.query('insert into permissoes_cliente values ($1,$2) on conflict do nothing', [usuarioId, c]);
+  });
 }
 
 // ---------- Configuração de papéis ----------

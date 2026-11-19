@@ -11,7 +11,7 @@ export default async function DefinirSenha({ searchParams }: PageProps<'/definir
   const sp = (await searchParams) as Record<string, string | undefined>;
   const { u } = await contexto();
   return (
-    <div className="mx-auto mt-10 max-w-sm rounded-xl border border-vx-linha bg-white p-6">
+    <div className="mx-auto mt-10 max-w-sm rounded-lg border border-vx-linha bg-vx-superficie shadow-vx p-6">
       <h1 className="text-xl font-bold">Definir senha</h1>
       <p className="mt-1 text-sm text-vx-texto-2">Olá, {u.nome}. Escolha a senha que você vai usar para entrar.</p>
       <form action={definirSenha} className="mt-4 space-y-3 text-sm">

@@ -13,8 +13,8 @@ npm start -- -p 7777        # http://localhost:7777
 ```
 
 Não precisa de Docker nem de banco instalado. Na primeira requisição o app cria um PostgreSQL embutido (PGlite) em
-`.data/pglite`, aplica as migrações de `db/migrations/` e semeia o catálogo e os dados de demonstração.
-Para começar do zero: apague `.data/` ou use **Demonstração → Resetar dados de demonstração**.
+`.data/pglite`, aplica as migrações de `db/migrations/` e semeia o catálogo e a equipe. O banco principal não recebe dados fictícios: registros marcados como demonstração são removidos na inicialização.
+Para começar do zero: apague `.data/`. Clientes são cadastrados em **Clientes** (direção) e o acesso de cada pessoa em **Usuários**.
 
 Testes: `npm test` (banco em memória). Verificação completa: `npm run verificar` (tipos, lint, testes e build).
 
@@ -27,10 +27,9 @@ Testes: `npm test` (banco em memória). Verificação completa: `npm run verific
 | **Clientes** | Filtros por cliente, estado, responsável e período. Tarefas, entregas e incidentes que o usuário pode acessar. |
 | **Aprovações e histórico** | Intenção, alvo, conta, parâmetros exatos, prazo, aprovador e decisão. Aprovar não executa nada fora do escritório. |
 | **Agentes** | 23 papéis do catálogo, estado de configuração, versões de instrução e a entrada para cadastrar as instruções. Lista de integrações. |
-| **Demonstração** | Dispara o fluxo piloto e os cenários de fonte ausente, falha/retomada, evento repetido e acesso a outro cliente. |
 
-"Ver como" no topo troca o usuário de demonstração (Tiago · direção, Fabiana, Lígia, Lorran) para testar o escopo.
-Todo dado sintético aparece com o rótulo **Demonstração**. Fonte indisponível aparece como **Integração pendente** ou **Sem dados**.
+Sem login ligado, "Ver como" troca o usuário (Tiago · direção, Fabiana, Lígia, Lorran) para testar o escopo.
+Dados sintéticos só existem na homologação (banco isolado) e nos testes. Fonte indisponível aparece como **Integração pendente** ou **Sem dados**.
 
 ### Fluxo piloto (briefing de uma carteira)
 
@@ -46,12 +45,12 @@ Todo dado sintético aparece com o rótulo **Demonstração**. Fonte indisponív
 lib/catalogo.ts       fonte única: andares, salas, 23 papéis, fases, donos, integrações, rótulos
 db/migrations/        migrações SQL (PostgreSQL), aplicadas automaticamente na partida
 lib/db.ts             PGlite local ou PostgreSQL (EasyPanel) via DATABASE_URL; migrações automáticas
-lib/seed.ts           sincroniza o catálogo e semeia/reseta a demonstração
+lib/seed.ts           sincroniza o catálogo, semeia a equipe e limpa dados de demonstração do banco principal
 lib/escopo.ts         regra única de visibilidade (cliente, financeiro, admin) em JS e SQL
 lib/dados.ts          leituras, sempre com escopo (inclusive contadores e resumos)
 lib/orquestracao.ts   fila persistida, executor sob demanda, delegação, retomada, aprovações, instruções
 lib/ia.ts             contrato do agente (zod) + adaptador simulado + ponto para provedor real
-lib/demo.ts           cenários de demonstração
+lib/demo.ts           cenários sintéticos usados só pela homologação e pelos testes
 app/                  telas (Next.js App Router) e ações do servidor
 app/api/              API interna: GET /api/tarefas · POST /api/eventos/reuniao (desligado sem token)
 tests/                testes do núcleo (vitest)

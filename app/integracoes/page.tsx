@@ -5,7 +5,7 @@ import { catalogo } from '@/lib/dados';
 import { DEFINICOES, PROVEDOR_IA, ROTULO_STATUS, historicoTestes, presencaCredenciais, testarDesatualizadas, ultimosTestes, type Status, type TesteGravado } from '@/lib/integracoes';
 import { dataHora } from '@/lib/formato';
 import { acaoTestarIntegracao, acaoTestarTodas } from '@/app/acoes';
-import { botao, botaoSec } from '@/components/ui';
+import { botao, botaoSec, link, Cabecalho, Aviso } from '@/components/ui';
 
 const ESTILO: Record<Status, [string, string]> = {
   conectado: ['✓', 'bg-vx-verde-claro text-vx-verde-escuro border-vx-verde/30'],
@@ -46,33 +46,28 @@ export default async function Integracoes({ searchParams }: PageProps<'/integrac
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="mr-auto">
-          <h1 className="text-2xl font-bold">Integrações</h1>
-          <p className="text-sm text-vx-texto-2">Status vindo de testes reais e somente leitura, ao abrir esta tela, ao clicar em “Testar conexão” e a cada 30 minutos. Chaves e tokens ficam só no servidor.</p>
-        </div>
-        {u.perfil === 'admin' && <form action={acaoTestarTodas}><button className={botaoSec}>Testar todas</button></form>}
-      </div>
+      <Cabecalho titulo="Integrações" descricao="Status de testes reais, só de leitura: ao abrir a tela, em “Testar conexão” e a cada 30 minutos. Chaves e tokens ficam só no servidor."
+        acoes={u.perfil === 'admin' && <form action={acaoTestarTodas}><button className={botao}>Testar todas</button></form>} />
 
-      {sp.ok && <p role="status" className="rounded-xl border border-vx-verde/30 bg-vx-verde-claro p-3 text-sm">Conta conectada e testada: {CARDS.find(i => i.id === sp.ok)?.nome}.</p>}
-      {sp.erro && <p role="alert" className="rounded-xl border border-vx-erro/30 bg-vx-erro-claro p-3 text-sm">{MSG[sp.erro] ?? 'Não foi possível concluir a conexão.'}</p>}
+      {sp.ok && <p role="status" className="rounded-lg border border-vx-verde/30 bg-vx-verde-claro px-3 py-2.5 text-sm"><span aria-hidden className="mr-1.5 font-bold">✓</span>Conta conectada e testada: {CARDS.find(i => i.id === sp.ok)?.nome}.</p>}
+      {sp.erro && <Aviso tom="erro">{MSG[sp.erro] ?? 'Não foi possível concluir a conexão.'}</Aviso>}
 
       <div className="grid gap-3 md:grid-cols-[auto_1fr]">
-        <div className="rounded-xl border border-vx-linha bg-white p-4">
+        <div className="rounded-lg border border-vx-linha bg-vx-superficie shadow-vx p-4">
           <p className="text-3xl font-bold tabular-nums">{conectadas} <span className="text-lg font-medium text-vx-texto-2">de {INTEGRACOES.length}</span></p>
           <p className="text-sm text-vx-texto-2">integrações conectadas</p>
         </div>
         {criticas.length > 0 ? (
-          <div role="alert" className="rounded-xl border border-vx-erro/40 bg-vx-erro-claro p-4 text-sm">
+          <div role="alert" className="rounded-lg border border-vx-erro/40 bg-vx-erro-claro p-4 text-sm">
             <p className="font-semibold text-vx-erro">✕ Agentes ativos dependem de integrações sem conexão</p>
             <ul className="mt-1 space-y-0.5">
               {criticas.map(i => (
-                <li key={i.id}><a href={`#${i.id}`} className="underline">{i.nome}</a> ({ROTULO_STATUS[porId.get(i.id)!.status]}) · usada por {(i.papeis as readonly string[]).filter(p => ativos.has(p)).map(p => papeis.get(p)?.nome).join(', ')}</li>
+                <li key={i.id}><a href={`#${i.id}`} className={link}>{i.nome}</a> ({ROTULO_STATUS[porId.get(i.id)!.status]}) · usada por {(i.papeis as readonly string[]).filter(p => ativos.has(p)).map(p => papeis.get(p)?.nome).join(', ')}</li>
               ))}
             </ul>
             <p className="mt-1 text-vx-texto-2">Enquanto isso, esses agentes trabalham só com o conteúdo anexado à tarefa e registram a fonte como lacuna.</p>
           </div>
-        ) : <div className="rounded-xl border border-vx-verde/30 bg-vx-verde-claro p-4 text-sm">Nenhum agente ativo depende de integração em erro ou sem configuração.</div>}
+        ) : <div className="rounded-lg border border-vx-verde/30 bg-vx-verde-claro p-4 text-sm">Nenhum agente ativo depende de integração em erro ou sem configuração.</div>}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -84,7 +79,7 @@ export default async function Integracoes({ searchParams }: PageProps<'/integrac
           const hist = historico.filter(h => h.integracao_id === i.id).slice(0, 6);
           const conectarHref = d.conexao.tipo === 'oauth' ? `/api/integracoes/google/conectar?alvo=${d.conexao.alvo}` : null;
           return (
-            <article key={i.id} id={i.id} aria-labelledby={`t-${i.id}`} className="scroll-mt-4 rounded-xl border border-vx-linha bg-white p-4 text-sm">
+            <article key={i.id} id={i.id} aria-labelledby={`t-${i.id}`} className="scroll-mt-4 rounded-lg border border-vx-linha bg-vx-superficie shadow-vx p-4 text-sm">
               <div className="flex items-start gap-3">
                 <span aria-hidden className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-vx-grafite text-xs font-bold text-white">{i.icone}</span>
                 <div className="mr-auto">
@@ -138,11 +133,11 @@ export default async function Integracoes({ searchParams }: PageProps<'/integrac
         })}
       </div>
 
-      <section aria-labelledby="hist" className="rounded-xl border border-vx-linha bg-white p-4">
-        <h2 id="hist" className="text-sm font-semibold uppercase tracking-wide text-vx-texto-2">Histórico de testes (últimos {historico.length})</h2>
+      <section aria-labelledby="hist" className="rounded-lg border border-vx-linha bg-vx-superficie shadow-vx p-4">
+        <h2 id="hist" className="text-[15px] font-semibold">Histórico de testes (últimos {historico.length})</h2>
         <div className="mt-2 max-h-96 overflow-auto">
           <table className="w-full text-left text-sm">
-            <thead className="sticky top-0 bg-white text-xs uppercase text-vx-texto-2"><tr><th className="py-1 pr-3">Quando</th><th className="py-1 pr-3">Integração</th><th className="py-1 pr-3">Resultado</th><th className="py-1 pr-3">Origem</th><th className="py-1">Mensagem</th></tr></thead>
+            <thead className="sticky top-0 bg-white text-xs font-semibold text-vx-texto-2"><tr><th className="py-1 pr-3">Quando</th><th className="py-1 pr-3">Integração</th><th className="py-1 pr-3">Resultado</th><th className="py-1 pr-3">Origem</th><th className="py-1">Mensagem</th></tr></thead>
             <tbody>
               {historico.map((h: TesteGravado) => (
                 <tr key={h.id} className="border-t border-vx-linha">

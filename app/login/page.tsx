@@ -16,7 +16,7 @@ export default async function Login({ searchParams }: PageProps<'/login'>) {
   const sp = (await searchParams) as Record<string, string | undefined>;
   if (loginLigado() && (await contextoOpcional())) redirect('/hoje');
   return (
-    <div className="mx-auto mt-10 max-w-sm rounded-xl border border-vx-linha bg-white p-6">
+    <div className="mx-auto mt-10 max-w-sm rounded-lg border border-vx-linha bg-vx-superficie shadow-vx p-6">
       <h1 className="text-xl font-bold">Entrar no Escritório</h1>
       {!loginLigado() ? (
         <p className="mt-2 text-sm text-vx-texto-2">O login não está ligado neste ambiente (modo demonstração). <Link href="/hoje" className="underline">Continuar</Link></p>

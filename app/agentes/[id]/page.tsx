@@ -6,7 +6,7 @@ import { PAPEIS, ROTULO_FASE, MODOS, FONTES_CONFIRMADAS, INTEGRACOES } from '@/l
 import { ultimosTestes, ROTULO_STATUS } from '@/lib/integracoes';
 import { dataHora } from '@/lib/formato';
 import { acaoSalvarInstrucao, acaoDesabilitarPapel } from '@/app/acoes';
-import { EstadoConfigBadge, Secao, Vazio, Demo, botao, botaoSec, campo } from '@/components/ui';
+import { EstadoConfigBadge, Secao, Vazio, Demo, botao, botaoSec, campo, Cabecalho, link, chip } from '@/components/ui';
 
 const ESTADO_INSTRUCAO: Record<string, string> = { rascunho: 'Rascunho', em_homologacao: 'Em homologação', aprovada: 'Aprovada (ativa)', arquivada: 'Arquivada' };
 
@@ -22,17 +22,15 @@ export default async function Agente({ params }: PageProps<'/agentes/[id]'>) {
   const [maior, menor] = (a.instrucoes[0]?.versao ?? '1.0').split('.').map(Number);
   return (
     <div className="space-y-5">
-      <nav className="text-sm text-vx-texto-2"><Link href="/agentes" className="underline">Agentes</Link> › {a.nome}</nav>
-      <div className="flex flex-wrap items-center gap-2">
-        <h1 className="text-2xl font-bold">{a.nome}</h1>
-        <EstadoConfigBadge estado={a.estado_config} />
-        <span className="rounded-full border border-vx-linha px-2 py-0.5 text-xs">{ROTULO_FASE[a.fase]}</span>
-      </div>
+      <Cabecalho titulo={a.nome} trilha={<><Link href="/agentes" className={link}>Agentes</Link> <span aria-hidden>/</span> {a.nome}</>}
+        descricao={`${a.departamento_nome} · responsável ${a.responsavel_proposto}`}
+        extra={<><EstadoConfigBadge estado={a.estado_config} /><span className={`${chip} border-vx-linha-forte bg-white`}>{ROTULO_FASE[a.fase]}</span></>}
+        acoes={<Link href={`/escritorio?sala=${a.departamento_id}&agente=${a.id}`} className={botaoSec}>Ver no escritório</Link>} />
 
       <Secao titulo="Configuração" id="config">
         <dl className="grid gap-3 text-sm sm:grid-cols-2">
           <div><dt className="text-vx-texto-2">ID canônico</dt><dd><code>{a.id}</code></dd></div>
-          <div><dt className="text-vx-texto-2">Sala</dt><dd><Link className="underline" href={`/escritorio?sala=${a.departamento_id}&agente=${a.id}`}>{a.departamento_nome}</Link></dd></div>
+          <div><dt className="text-vx-texto-2">Sala</dt><dd><Link className={link} href={`/escritorio?sala=${a.departamento_id}&agente=${a.id}`}>{a.departamento_nome}</Link></dd></div>
           <div><dt className="text-vx-texto-2">Responsável humano</dt><dd>{a.responsavel_proposto}</dd></div>
           <div><dt className="text-vx-texto-2">Nível de autonomia</dt><dd>{a.execucao_habilitada ? MODOS[a.modo as keyof typeof MODOS] : 'Sem execução até a aprovação'}</dd></div>
           <div><dt className="text-vx-texto-2">Homologado com</dt><dd>{a.homologado_com ?? '—'}</dd></div>
@@ -43,7 +41,7 @@ export default async function Agente({ params }: PageProps<'/agentes/[id]'>) {
             <dt className="text-vx-texto-2">Fontes</dt>
             <dd>
               <ul className="mt-1 space-y-0.5">{a.fontes.filter(f => FONTES_CONFIRMADAS.includes(f)).map(f => <li key={f}>✓ {f}</li>)}</ul>
-              <ul className="mt-1 space-y-0.5">{integ.map(i => <li key={i.id}><Link href={`/integracoes#${i.id}`} className="underline">{i.nome}</Link> · {ROTULO_STATUS[testes.get(i.id) ?? 'nao_testado']}</li>)}</ul>
+              <ul className="mt-1 space-y-0.5">{integ.map(i => <li key={i.id}><Link href={`/integracoes#${i.id}`} className={link}>{i.nome}</Link> · {ROTULO_STATUS[testes.get(i.id) ?? 'nao_testado']}</li>)}</ul>
             </dd>
           </div>
           <div>
@@ -57,7 +55,7 @@ export default async function Agente({ params }: PageProps<'/agentes/[id]'>) {
         {u.perfil === 'admin' && a.estado_config !== 'desabilitado' && (
           <form action={acaoDesabilitarPapel} className="mt-4 flex flex-wrap items-end gap-2 border-t border-vx-linha pt-3 text-sm">
             <input type="hidden" name="papel" value={a.id} />
-            <label className="flex flex-1 flex-col gap-1">Motivo para desabilitar<input name="motivo" required minLength={3} maxLength={300} className={campo} /></label>
+            <label className="flex min-w-56 flex-1 flex-col gap-1 text-xs font-medium text-vx-texto-2">Motivo para desabilitar<input name="motivo" required minLength={3} maxLength={300} className={campo} /></label>
             <button className={botaoSec}>Desabilitar papel</button>
           </form>
         )}
@@ -104,7 +102,7 @@ export default async function Agente({ params }: PageProps<'/agentes/[id]'>) {
       <Secao titulo="Histórico autorizado" total={a.historico.length} id="hist">
         {a.historico.length ? (
           <ul className="space-y-1 text-sm">
-            {a.historico.map(h => <li key={h.id}><Link className="underline" href={`/tarefas/${h.tarefa_id}`}>{h.objetivo}</Link> · {h.etapa} · {h.estado} · {dataHora(h.atualizado_em)} <Demo ativo={h.demo} /></li>)}
+            {a.historico.map(h => <li key={h.id}><Link className={link} href={`/tarefas/${h.tarefa_id}`}>{h.objetivo}</Link> · {h.etapa} · {h.estado} · {dataHora(h.atualizado_em)} <Demo ativo={h.demo} /></li>)}
           </ul>
         ) : <Vazio>Sem execuções que você possa ver.</Vazio>}
       </Secao>

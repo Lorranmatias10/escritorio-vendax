@@ -186,6 +186,27 @@ export async function usuarios(q: Q) {
 
 // ---------- Homologação ----------
 export type CasoHomologacao = { caso: string; esperado: string; passou: boolean; evidencia: Record<string, unknown>; versao: string; rodada: string; executado_em: string; executado_por: string };
+// ---------- Comunicação entre agentes (passagens de tarefa) ----------
+// Cada delegação registrada vira uma "conversa": o papel que concluiu a etapa leva o trabalho ao papel de destino.
+// Respeita o mesmo escopo de visibilidade da tarefa de origem.
+export type Conversa = { id: string; de: string; para: string; quando: string; objetivo: string };
+export async function conversasRecentes(q: Q, u: Usuario, limite = 8) {
+  const params: unknown[] = [];
+  const f = filtroSql(u, params, 't.cliente_id', 't.area_interna');
+  params.push(limite);
+  const r = await q.query<Conversa>(
+    `select e.id::text as id, e.criado_em as quando, sub.papel_atual_id as para, sub.objetivo,
+       (select x.papel_id from execucoes x join tarefas tx on tx.id = x.tarefa_id
+        where (tx.id = t.id or tx.parent_id = t.id) and x.estado = 'concluida' and x.concluido_em <= e.criado_em
+        order by x.concluido_em desc limit 1) as de
+     from eventos_tarefa e
+     join tarefas t on t.id = e.tarefa_id
+     join tarefas sub on sub.id::text = e.dados->>'subtarefa'
+     where e.tipo = 'delegada' and e.criado_em > now() - interval '7 days' and ${f}
+     order by e.criado_em desc limit $${params.length}`, params);
+  return r.filter(c => c.de && c.para && c.de !== c.para);
+}
+
 export async function ultimaHomologacao(q: Q, papel?: string) {
   const params: unknown[] = [];
   const filtro = papel ? (params.push(papel), 'where $1 = any(papeis)') : '';
@@ -193,6 +214,6 @@ export async function ultimaHomologacao(q: Q, papel?: string) {
   if (!ult) return null;
   const casos = await q.query<CasoHomologacao>(
     `select h.caso, h.esperado, h.passou, h.evidencia, h.versao, h.rodada, h.executado_em, u.nome as executado_por
-     from homologacoes h join usuarios u on u.id = h.executado_por where h.rodada = $1 order by h.id`, [ult.rodada]);
+     from homologacoes h join usuarios u on u.id = h.executado_por where h.rodada = $1 and ($2::text is null or $2 = any(h.papeis)) order by h.id`, [ult.rodada, papel ?? null]);
   return { rodada: ult.rodada, versao: casos[0].versao, executado_em: casos[0].executado_em, executado_por: casos[0].executado_por, aprovado: casos.every(c => c.passou), casos };
 }
