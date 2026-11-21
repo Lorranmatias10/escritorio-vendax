@@ -3,8 +3,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { abrirBanco, type Banco } from '@/lib/db';
 import { carregarUsuario, type Usuario } from '@/lib/escopo';
 import { contasDoCliente, obterFichaCliente } from '@/lib/ficha-cliente';
-import { historicoRotina, hoje, listarRotinas } from '@/lib/dados';
-import { horarioRotina, janelaRotina } from '@/lib/agenda-rotinas';
+import { auditoriaCliente, historicoRotina, hoje, listarRotinas } from '@/lib/dados';
+import { horarioRotina, janelaRotina, semanaAnteriorAoPeriodo } from '@/lib/agenda-rotinas';
+import { consultarFontes, planoFontes } from '@/lib/fontes-cliente';
+import { adaptadorSimulado } from '@/lib/ia';
 import {
   atualizarFichaCliente, decidirAprovacao, definirRotinaAtiva, dispararRotinasVencidas, gravarVinculoCliente,
   processarFila, receberEventoReuniao, receberPedido, retirarVinculoCliente, rodarRotinaAgora, salvarRotina, verificarVinculoCliente,
@@ -137,6 +139,19 @@ describe('ficha e escopo das fontes', () => {
     expect((await contasDoCliente(b,tiago,a))[0]).toMatchObject({ verificado_em:null,verificado_por:null });
   });
 
+  it('mantém ações distintas de cadastro, verificação, edição e remoção no histórico', async () => {
+    stubAds();
+    await vincular(a,ads().identificador,true);
+    const [verificada] = await contasDoCliente(b,tiago,a);
+    await gravarVinculoCliente(b,tiago,a,{ ...ads(), rotulo:'Rótulo revisado' },verificada);
+    const [editada] = await contasDoCliente(b,tiago,a);
+    await retirarVinculoCliente(b,tiago,a,editada.id,editada.versao);
+    const historico = await auditoriaCliente(b,tiago,a);
+    expect(historico.map(r => r.acao)).toEqual(['conta_removida','conta_editada','conta_verificada','conta_criada']);
+    expect(historico[2].detalhe).toBe(historico[3].detalhe);
+    expect(historico.every(r => r.ator === tiago.nome)).toBe(true);
+  });
+
   it('usa o contato da ficha e o rascunho no fluxo real de reunião, dentro de A1', async () => {
     const fetch = stubAds();
     await atualizarFichaCliente(b,tiago,a,{ ...perfil,contato_nome:'Contato de teste',contato_whatsapp:'+5511999991234' });
@@ -161,7 +176,131 @@ async function rotina(mudancas: Record<string,unknown> = {}) {
   return id;
 }
 
+const projeto = { integracao:'reportei', tipo:'projeto_reportei', identificador:'3001', rotulo:'Projeto de teste' };
+const googleAds = { integracao:'google-ads', tipo:'customer_id', identificador:'1234567890', rotulo:'Google de teste' };
+const periodoPrincipal = { inicio:'2026-11-16', fim:'2026-11-22' };
+const periodoComparacao = { inicio:'2026-11-09', fim:'2026-11-15' };
+const metrica = { id:'impressions', reference_key:'fb_ads:impressions', component:'number_v1', metrics:['impressions'], type:['impressions'] };
+
+async function verificarConta(entrada: typeof projeto) {
+  await gravarVinculoCliente(b,tiago,a,entrada);
+  const v = (await contasDoCliente(b,tiago,a)).find(v => v.integracao === entrada.integracao)!;
+  await verificarVinculoCliente(b,tiago,a,v.id,v.versao);
+}
+
+function stubMetricas(opcoes: { integracaoDeOutroProjeto?: boolean; comparacaoIndisponivel?: boolean } = {}) {
+  vi.stubEnv('REPORTEI_TOKEN','reportei-teste');
+  vi.stubEnv('REPORTEI_BASE_URL','https://app.reportei.com/api');
+  vi.stubEnv('GOOGLE_OAUTH_CLIENT_ID','google-teste');
+  vi.stubEnv('GOOGLE_OAUTH_CLIENT_SECRET','google-secret-teste');
+  vi.stubEnv('google-ads:refresh_token','google-refresh-teste');
+  const fetch = vi.fn(async (entrada: URL | string, req?: RequestInit) => {
+    const url = new URL(entrada);
+    const body = typeof req?.body === 'string' ? JSON.parse(req.body) : undefined;
+    if (url.hostname === 'app.reportei.com') {
+      if (url.pathname === '/api/v2/projects/3001') return json({project:{id:3001,name:'Projeto de teste'}});
+      if (url.pathname === '/api/v2/integrations' && url.searchParams.get('project_id') === '3001') {
+        return json({data:[
+          {id:81,project_id:opcoes.integracaoDeOutroProjeto ? 3002 : 3001,slug:'facebook_ads',status:'active'},
+          {id:82,project_id:3001,slug:'facebook_ads',status:'revoked'},
+        ]});
+      }
+      if (url.pathname === '/api/v2/metrics' && url.searchParams.get('integration_slug') === 'facebook_ads') return json({data:[metrica]});
+      if (url.pathname === '/api/v2/metrics/get-data') {
+        expect(req?.method).toBe('POST');
+        expect(body).toEqual({integration_id:81,start:periodoPrincipal.inicio,end:periodoPrincipal.fim,metrics:[metrica]});
+        return json({data:{impressions:{values:0}}});
+      }
+    }
+    if (url.hostname === 'oauth2.googleapis.com') return json({access_token:'google-access-teste'});
+    if (url.hostname === 'googleads.googleapis.com') {
+      expect(url.pathname).toMatch(/\/customers\/1234567890\/googleAds:searchStream$/);
+      const query = String(body?.query);
+      const customer = {id:googleAds.identificador,currencyCode:'BRL'};
+      const ehComparacao = query.includes(periodoComparacao.inicio);
+      const campaign = {id:ehComparacao ? 'gb' : 'ga',name:'Campanha Google'};
+      if (query.includes('FROM customer')) return json([{results:[{customer}]}]);
+      if (query.includes('segments.date')) {
+        expect(query).toContain(ehComparacao ? periodoComparacao.fim : periodoPrincipal.fim);
+        expect(query).toContain('metrics.conversions');
+        return json([{results:[{customer,campaign,metrics:{impressions:'600',clicks:'60',costMicros:'5000000',conversions:1.5}}]}]);
+      }
+      return json([{results:[{customer,campaign}]}]);
+    }
+    if (url.hostname === 'graph.facebook.com') {
+      const account_id = ads().identificador;
+      expect(url.pathname).toContain(`/act_${account_id}`);
+      if (url.searchParams.get('fields') === 'account_id') return json({account_id});
+      if (url.pathname.endsWith('/campaigns')) return json({data:[{account_id,id:'ma'}]});
+      if (url.pathname.endsWith('/insights')) {
+        const {since,until} = JSON.parse(url.searchParams.get('time_range')!);
+        const ehComparacao = since === periodoComparacao.inicio;
+        const paginou = url.searchParams.get('after') === 'cursor-teste';
+        expect({inicio:since,fim:until}).toEqual(ehComparacao ? periodoComparacao : periodoPrincipal);
+        expect(url.searchParams.get('fields')).toContain(',conversions');
+        if (ehComparacao && opcoes.comparacaoIndisponivel) return new Response(null,{status:503});
+        const linha = {account_id,campaign_id:ehComparacao ? 'mb' : paginou ? 'mc' : 'ma',campaign_name:'Campanha Meta',
+          account_currency:'BRL',impressions:'500',clicks:'50',spend:'12.34',date_start:since,date_stop:until,
+          conversions:[{action_type:'lead',value:'3'}]};
+        return json({data:[linha],...(!ehComparacao && !paginou ? {paging:{next:'https://graph.facebook.com/proxima',cursors:{after:'cursor-teste'}}} : {})});
+      }
+    }
+    throw new Error(`Consulta inesperada: ${url.pathname}`);
+  });
+  vi.stubGlobal('fetch',fetch);
+  return fetch;
+}
+
 describe('rotinas agendadas', () => {
+  it('entrega métricas do projeto e campanhas dos dois períodos ao agente em A1', async () => {
+    const fetch = stubMetricas();
+    await vincular(a,ads().identificador,true);
+    await verificarConta(googleAds);
+    await verificarConta(projeto);
+    expect(fetch.mock.calls.filter(([url]) => new URL(url).hostname === 'app.reportei.com').map(([url]) => new URL(url).pathname))
+      .toEqual(['/api/v2/projects/3001']);
+    await gravarVinculoCliente(b,tiago,c,{...projeto,identificador:'3002'});
+    const id = await rotina({frequencia:'semanal',dia:1,fontes:['meta-ads','google-ads','reportei']});
+    const disparo = await rodarRotinaAgora(b,tiago,id,data);
+    expect(disparo.tarefaId).toBeTruthy();
+    const executar = vi.fn(adaptadorSimulado.executar);
+    await processarFila(b,{ ...adaptadorSimulado,executar },1,disparo.tarefaId!);
+    const fontes = executar.mock.calls[0][0].conteudo_recuperado;
+    const reportei = fontes.find(f => f.fonte === 'Reportei · 3001');
+    expect(reportei?.identificador).toBe('3001');
+    expect(JSON.parse(reportei!.texto)).toMatchObject({conta:'3001',periodo:periodoPrincipal,dados:{
+      id:'3001',integracoes:[{integracao_id:81,metricas:[{indicador:'fb_ads:impressions',valor:0}]}],
+    }});
+    for (const { nome, conta, camp, campComparacao, custo, conversoes } of [
+      {nome:'Meta Ads',conta:ads().identificador,camp:'ma',campComparacao:'mb',custo:12.34,conversoes:[{tipo:'lead',valor:3}]},
+      {nome:'Google Ads',conta:googleAds.identificador,camp:'ga',campComparacao:'gb',custo:5,conversoes:1.5},
+    ]) {
+      const principal = fontes.find(f => f.fonte === `${nome} · ${conta} · Período principal`);
+      const comparacao = fontes.find(f => f.fonte === `${nome} · ${conta} · Período de comparação`);
+      for (const [fonte,periodo,idCampanha] of [[principal,periodoPrincipal,camp],[comparacao,periodoComparacao,campComparacao]] as const) {
+        expect(fonte?.identificador).toBe(conta);
+        const evid = JSON.parse(fonte!.texto);
+        expect(evid.periodo).toEqual(periodo);
+        expect(evid.dados.metricas[0]).toMatchObject({id:idCampanha,moeda:'BRL',impressoes:expect.any(Number),cliques:expect.any(Number),custo,conversoes});
+        if (nome === 'Meta Ads' && fonte === principal) expect(evid.dados.metricas[1].id).toBe('mc');
+      }
+    }
+    expect((await hoje(b,fabiana)).aprovacoes.find(t => t.tarefa_id === disparo.tarefaId)).toMatchObject({modo:'A1',alvo:'Revisão interna'});
+    expect(fetch.mock.calls.some(([url]) => new URL(url).pathname.endsWith('/3002'))).toBe(false);
+  });
+
+  it('não busca métricas de integração com outro projeto e preserva o período principal se a comparação falhar', async () => {
+    const fetch = stubMetricas({integracaoDeOutroProjeto:true,comparacaoIndisponivel:true});
+    await vincular(a,ads().identificador,true);
+    await verificarConta(projeto);
+    const plano = await planoFontes(b,tiago,a,null,['reportei','meta-ads'],'dados_atribuicao');
+    const fontes = await consultarFontes(b,plano,periodoPrincipal,periodoComparacao);
+    expect(fontes.find(f => f.fonte === 'Reportei · 3001')).toMatchObject({disponivel:false,identificador:'3001'});
+    expect(fetch.mock.calls.some(([url]) => new URL(url).pathname.endsWith('/metrics/get-data'))).toBe(false);
+    expect(fontes.find(f => f.fonte.endsWith('Período principal'))?.disponivel).not.toBe(false);
+    expect(fontes.find(f => f.fonte.endsWith('Período de comparação'))).toMatchObject({disponivel:false,texto:expect.stringContaining('HTTP 503')});
+  });
+
   it('retoma somente a janela perdida mais recente e não duplica mesmo com disparos concorrentes', async () => {
     const fetch = stubAds();
     await vincular(a,ads().identificador,true);
@@ -235,5 +374,6 @@ describe('rotinas agendadas', () => {
     const r = { frequencia:'mensal',dia:31,hora:'08:00' } as const;
     expect(horarioRotina(r,new Date('2027-02-01T12:30:00Z'),'proxima').toISOString()).toBe('2027-02-28T11:00:00.000Z');
     expect(janelaRotina({frequencia:'semanal',dia:1,hora:'08:00'},new Date('2026-11-23T01:00:00Z'))).toBe('2026-11-16');
+    expect(semanaAnteriorAoPeriodo({inicio:'2027-01-04'})).toEqual({inicio:'2026-12-28',fim:'2027-01-03'});
   });
 });

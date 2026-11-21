@@ -13,6 +13,13 @@ import { ContasFicha } from './contas';
 
 const situacoes = ['Ativo', 'Projeto', 'Prospect', 'Inativo', 'Encerrado'];
 const ROTULOS = { principal: 'Principal para consulta', historica: 'Histórica / alternativa', verificar: 'A confirmar' };
+const ACOES_CADASTRO: Record<string, string> = {
+  ficha_atualizada: 'atualizou a ficha',
+  conta_criada: 'cadastrou o vínculo',
+  conta_verificada: 'verificou o vínculo',
+  conta_editada: 'editou o vínculo',
+  conta_removida: 'removeu o vínculo',
+};
 const FILTRO = '/clientes/memoria';
 
 export default async function Memoria({ searchParams }: PageProps<'/clientes/memoria'>) {
@@ -72,7 +79,8 @@ export default async function Memoria({ searchParams }: PageProps<'/clientes/mem
     {id && <ContasFicha cliente={id} contas={contas} admin={admin} />}
     {auditoria.length > 0 && <Secao titulo="Histórico do cadastro">
       <ul className="divide-y divide-vx-linha">{auditoria.map(a => <li key={a.id} className="px-3 py-2 text-sm">
-        {a.detalhe} · {a.ator} · {dataHora(a.criado_em)}
+        <span className="font-medium">{a.ator} {ACOES_CADASTRO[a.acao] ?? 'registrou uma alteração'}</span>
+        {' · '}{a.detalhe} · {dataHora(a.criado_em)}
       </li>)}</ul>
     </Secao>}
     <Secao titulo={cliente ? "Contexto operacional" : "Vendax"}>

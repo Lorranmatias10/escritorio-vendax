@@ -28,7 +28,7 @@ A rota dedicada de disponibilidade é reutilizada nos testes de conexão do Escr
 2. Na variável `VENDAX_OFFICE_READER_RECURSOS`, cadastre somente os recursos aprovados com o ID da conta interna correspondente. Cada entrada tem os campos `tipo`, `identificador` e `conta`. Os tipos aceitos são `funil`, `waba` e `numero_whatsapp`. Para telefone, use o ID do número na API.
 3. Configure a mesma chave de leitura em `VENDAX_APP_READER_TOKEN` no Escritório e verifique o vínculo na ficha. O monitor retorna o estado registrado no Vendax App e a evidência de canal desabilitado. A qualidade e a entrega real na Meta dependem de uma fonte que forneça esses dados.
 
-O Reportei V2 entrega os relatórios disponíveis por projeto. No Connect, a credencial do merchant confirma o ID do customer. Métricas nessa modalidade exigem a credencial própria do customer.
+O Reportei V2 consulta indicadores numéricos das integrações ativas do projeto verificado no período da rotina. A fonte inclui o ID do projeto. No Connect, a credencial do merchant confirma o ID do customer. A leitura de métricas nessa modalidade exige a credencial própria do customer.
 
 ### Reversão
 

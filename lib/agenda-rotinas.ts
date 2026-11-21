@@ -31,6 +31,11 @@ const isoDia = (data: Date) => data.toISOString().slice(0,10);
 const deslocarDias = (d: Date, dias: number) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + dias));
 const inicioSemana = (d: Date) => deslocarDias(d, -((d.getUTCDay() + 6) % 7));
 
+export function semanaAnteriorAoPeriodo({ inicio }: { inicio: string }) {
+  const primeiroDia = new Date(inicio + 'T00:00:00Z');
+  return { inicio: isoDia(deslocarDias(primeiroDia,-7)), fim: isoDia(deslocarDias(primeiroDia,-1)) };
+}
+
 function instante(dia: Date, hora: string) {
   const civil = `${isoDia(dia)}T${hora.slice(0,5)}:00`;
   const offset = formatoOffset.formatToParts(new Date(civil + 'Z')).find(p => p.type === 'timeZoneName')?.value.slice(3) || '+00:00';

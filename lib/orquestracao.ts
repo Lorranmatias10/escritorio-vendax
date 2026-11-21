@@ -8,7 +8,7 @@ import { consultaAds } from './consulta-ads';
 import { confirmarFontesInternas, confirmarIdentidadeConta, consultarFontes, pendenciasFontes, planoFontes } from './fontes-cliente';
 import { contasDoCliente, dadosContaCliente, dadosFichaCliente, fonteCliente,
   obterFichaCliente, operacoesVendax, type FonteCliente } from './ficha-cliente';
-import { formularioRotina, horarioRotina, janelaRotina, periodoRotina, type Rotina } from './agenda-rotinas';
+import { formularioRotina, horarioRotina, janelaRotina, periodoRotina, semanaAnteriorAoPeriodo, type Rotina } from './agenda-rotinas';
 import { dadosReuniaoDemo } from './demo';
 import { fontesDaMemoria } from './memoria-vendax';
 import type { z } from 'zod';
@@ -365,7 +365,8 @@ async function prepararEntrada(q: Q, ex: ExecRow): Promise<EntradaAgente> {
       ex.entrada.contexto.rotina === true ? undefined : String(pedido));
     const pendencias = pendenciasFontes(plano,t.cliente_id);
     const data = periodo ?? periodoAdsPadrao();
-    fontes.push(...(pendencias.length ? pendencias : await consultarFontes(q,plano,data)));
+    const comparacao = periodo && ex.entrada.contexto.rotina === true ? semanaAnteriorAoPeriodo(periodo) : undefined;
+    fontes.push(...(pendencias.length ? pendencias : await consultarFontes(q,plano,data,comparacao)));
   }
   const contexto = { ...ex.entrada.contexto };
   if (ex.etapa === 'diretor_triagem' || ex.etapa === 'diretor_revisao') {
