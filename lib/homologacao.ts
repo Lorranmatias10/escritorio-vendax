@@ -264,7 +264,8 @@ async function rodarCasosFase(sb: Banco, cenarios: Cenario[], rotulo: string): P
         instrucao_versionada: ex[0]?.versao_instrucao !== null,
         revisao_do_dono: t.estado === 'aguardando_aprovacao' && ap?.aprovador_id === c.dono,
         nenhum_efeito_confirmado_em_A1: ex[0]?.saida?.efeito_confirmado === null,
-        execucao_externa_desabilitada: dec?.externa === 'desabilitada_v1' && tDec.eventos.some(e => e.tipo === 'acao_externa_bloqueada'),
+        execucao_externa_desabilitada: dec?.externa === 'desabilitada_v1' && ap?.modo === 'A1' &&
+          tDec.eventos.some(e => e.tipo === 'aprovacao_decidida') && !tDec.evidencias.some(e => e.tipo === 'acao_solicitada'),
       }), { tarefa: tarefaId, resumo: ex[0]?.saida?.resumo });
 
       const rep = await receberPedido(sb, dono, ped);

@@ -18,11 +18,11 @@ beforeEach(async () => {
 });
 
 describe('catálogo', () => {
-  it('carrega 5 andares, 9 departamentos e 23 papéis; só o piloto aguarda configuração', async () => {
+  it('carrega 5 andares, 9 departamentos e 25 papéis; só o piloto aguarda configuração', async () => {
     const c = await catalogo(b);
     expect(c.andares).toHaveLength(5);
     expect(c.deptos).toHaveLength(9);
-    expect(c.papeis).toHaveLength(23);
+    expect(c.papeis).toHaveLength(PAPEIS.length);
     const piloto = c.papeis.filter(p => p.fase === 'piloto').map(p => p.id).sort();
     expect(piloto).toEqual([...PAPEIS_PILOTO].sort());
     expect(c.papeis.filter(p => p.fase === 'piloto').every(p => p.estado_config === 'em_homologacao' && !p.execucao_habilitada)).toBe(true);
@@ -142,26 +142,29 @@ describe('aprovação A3', () => {
   });
 });
 
-describe('instruções dos 23 agentes', () => {
-  it('o arquivo v1.0 tem a instrução comum, 23 blocos e 7 casos, com IDs, nomes, fases e donos iguais ao catálogo', () => {
-    const [v] = lerCatalogoInstrucoes();
+describe('instruções versionadas dos agentes', () => {
+  it('as versões preservam os 7 casos e cobrem todos os papéis com fase e dono', () => {
+    const [v,especialistas] = lerCatalogoInstrucoes();
     expect(v.versao).toBe('1.0');
     expect(v.comum).toMatch(/Você é um agente do Escritório Vendax/);
     expect(v.papeis).toHaveLength(23);
     expect(v.casos).toHaveLength(7);
     const fase = { 1: 'piloto', 2: 'fase_2', 3: 'fase_3' } as const;
-    for (const p of v.papeis) {
+    expect(especialistas.versao).toBe('1.1');
+    for (const p of [...v.papeis,...especialistas.papeis]) {
       const c = PAPEIS.find(x => x.id === p.id);
       expect(c, p.id).toBeDefined();
-      expect([c!.nome, c!.fase, c!.responsavel]).toEqual([p.nome, fase[p.fase], p.dono]);
+      expect([c!.fase,c!.responsavel]).toEqual([fase[p.fase],p.dono]);
+      const renomeados: Record<string,string> = { diretor_operacoes: 'Diretor Geral IA', midia_paga: 'Líder de Mídia Paga' };
+      expect(c!.nome).toBe(renomeados[p.id] ?? p.nome);
       expect(p.bloco).toMatch(/\*\*Entregue\*\*/);
     }
   });
 
   it('cada papel tem a instrução composta (comum + bloco) importada e versionada', async () => {
     const r = await b.query<{ papel_id: string; versao: string; conteudo: string }>('select papel_id, versao, conteudo from instrucoes');
-    expect(r).toHaveLength(23);
-    expect(r.every(i => i.versao === '1.0' && i.conteudo.includes('Instrução comum') && i.conteudo.includes(i.papel_id))).toBe(true);
+    expect(r).toHaveLength(PAPEIS.length);
+    expect(r.every(i => ['1.0','1.1'].includes(i.versao) && i.conteudo.includes('Instrução comum') && i.conteudo.includes(i.papel_id))).toBe(true);
   });
 });
 
@@ -212,7 +215,7 @@ describe('dados reais: clientes e acesso', () => {
     const [{ c }] = await b.query<{ c: number }>('select count(*)::int c from clientes');
     const [{ t }] = await b.query<{ t: number }>('select count(*)::int t from tarefas');
     const [{ p }] = await b.query<{ p: number }>('select count(*)::int p from papeis');
-    expect([c, t, p]).toEqual([0, 0, 23]);
+    expect([c, t, p]).toEqual([0, 0, PAPEIS.length]);
     expect((await b.query('select id from usuarios')).length).toBe(4);
   });
 
@@ -273,7 +276,10 @@ describe('homologação da fase 3', () => {
     expect(r.resultados).toHaveLength(56);
     expect(r.aprovados.sort()).toEqual([...PAPEIS_FASE_3].sort());
     const c = await catalogo(b);
-    expect(c.papeis.filter(p => p.fase === 'fase_3').map(p => p.id).sort()).toEqual([...PAPEIS_FASE_3].sort());
+    const fase3 = c.papeis.filter(p => p.fase === 'fase_3');
+    expect(fase3.filter(p => !PAPEIS_FASE_3.includes(p.id)).map(p => p.id).sort())
+      .toEqual(['especialista_google_ads','especialista_meta_ads']);
+    expect(fase3.filter(p => !PAPEIS_FASE_3.includes(p.id)).every(p => !p.execucao_habilitada)).toBe(true);
     for (const p of c.papeis.filter(p => PAPEIS_FASE_3.includes(p.id)))
       expect([p.estado_config, p.execucao_habilitada, p.modo, p.versao_instrucao]).toEqual(['habilitado', true, 'A1', '1.0']);
     const [{ h }] = await b.query<{ h: number }>(`select count(*)::int h from tarefas where origem_evento_id like 'homolog-%'`);

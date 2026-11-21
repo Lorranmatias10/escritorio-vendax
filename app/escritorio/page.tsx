@@ -52,7 +52,7 @@ export default async function Escritorio({ searchParams }: PageProps<'/escritori
   const salaSel = lista.find(s => s.id === p.sala);
   return (
     <EscritorioInterativo key={u.id} inicial={inicial} usuario={u.id} equipe={equipe.filter(p => p.id !== u.id).map(({ id, nome }) => ({ id, nome }))} agentes={agentesVivos} salas={salasVivas}
-      especialistas={especialistas} clientes={clientes.filter(c => !c.demo).map(({ id, nome }) => ({ id, nome }))}
+      especialistas={especialistas} clientes={clientes.filter(c => !c.demo).map(({ id, nome, status }) => ({ id, nome, status }))}
       filtros={<BarraVista p={p} estado={estado} />} zonas={lista.map(s => <SalaNoPredio key={s.id} s={s} p={p} />)}
       mostraPredio={p.vista !== 'lista'} mostraLista={p.vista === 'lista'}
       lista={p.vista === 'lista' ? <div className="space-y-5">

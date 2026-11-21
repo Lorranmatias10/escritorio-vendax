@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { contexto } from '@/lib/sessao';
 import { clientesVisiveis, listarTarefas, listarEntregas, listarIncidentes, usuarios } from '@/lib/dados';
+import { STATUS_CLIENTE, statusCliente } from '@/lib/ficha-cliente';
 import { ESTADOS_TAREFA, ROTULO_ESTADO_TAREFA, type EstadoTarefa } from '@/lib/catalogo';
 import { LinhaTarefa, Secao, Vazio, Demo, Prazo, campo, botao, Cabecalho, BarraFiltros, CampoFiltro, link, chip, Aviso } from '@/components/ui';
 import { acaoCriarCliente } from '@/app/acoes';
@@ -26,11 +27,14 @@ export default async function Clientes({ searchParams }: PageProps<'/clientes'>)
     de: data.test(sp.de ?? '') ? sp.de : undefined,
     ate: data.test(sp.ate ?? '') ? sp.ate : undefined,
   };
-  const filtrado = Object.values(f).some(Boolean);
+  const status = statusCliente.safeParse(sp.status).data;
+  const clientesFiltrados = clientes.filter(c => (!status || c.status === status) && (!f.cliente || c.id === f.cliente));
+  const idsFiltrados = new Set(clientesFiltrados.map(c => c.id));
+  const filtrado = Object.values(f).some(Boolean) || Boolean(status);
   const [tarefas, entregas, incidentes] = await Promise.all([
-    listarTarefas(b, u, { ...f, raiz: false }).then(ts => ts.filter(t => t.cliente_id)),
-    listarEntregas(b, u, { cliente: f.cliente, de: f.de, ate: f.ate }),
-    listarIncidentes(b, u, { cliente: f.cliente }),
+    listarTarefas(b, u, { ...f, raiz: false }).then(ts => ts.filter(t => t.cliente_id && idsFiltrados.has(t.cliente_id))),
+    listarEntregas(b, u, { cliente: f.cliente, de: f.de, ate: f.ate }).then(es => es.filter(e => idsFiltrados.has(e.cliente_id))),
+    listarIncidentes(b, u, { cliente: f.cliente }).then(is => is.filter(i => !status || (i.cliente_id && idsFiltrados.has(i.cliente_id)))),
   ]);
   return (
     <div className="space-y-5">
@@ -55,7 +59,13 @@ export default async function Clientes({ searchParams }: PageProps<'/clientes'>)
                 {clientes.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
               </select>
             </CampoFiltro>
-            <CampoFiltro rotulo="Estado">
+            <CampoFiltro rotulo="Status do cliente">
+              <select name="status" defaultValue={status ?? ''} className={campo}>
+                <option value="">Todos</option>
+                {Object.entries(STATUS_CLIENTE).map(([k,v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </CampoFiltro>
+            <CampoFiltro rotulo="Estado da tarefa">
               <select name="estado" defaultValue={f.estado ?? ''} className={campo}>
                 <option value="">Todos</option>
                 {ESTADOS_TAREFA.map(e => <option key={e} value={e}>{ROTULO_ESTADO_TAREFA[e]}</option>)}
@@ -74,6 +84,19 @@ export default async function Clientes({ searchParams }: PageProps<'/clientes'>)
           </BarraFiltros>
         } />
       {clientes.length === 0 && <div className="rounded-lg border border-vx-linha bg-vx-superficie"><Vazio>{u.perfil === 'admin' ? 'Nenhum cliente cadastrado. Use “Cadastrar cliente” acima para começar.' : 'Seu usuário ainda não tem clientes liberados. Peça acesso à direção.'}</Vazio></div>}
+      <Secao titulo="Carteira" total={clientesFiltrados.length}>
+        {clientesFiltrados.length ? <div className="overflow-x-auto"><table className="w-full text-left text-sm">
+          <thead><tr className="text-vx-texto-2"><th className="p-2">Cliente</th><th className="p-2">Status</th><th className="p-2">Responsável</th><th className="p-2">Ficha</th></tr></thead>
+          <tbody className="divide-y divide-vx-linha">
+            {clientesFiltrados.map(c => <tr key={c.id}>
+              <th scope="row" className="p-2 font-medium">{c.nome} <Demo ativo={c.demo} /></th>
+              <td className="p-2">{c.status ? STATUS_CLIENTE[c.status] : c.demo ? 'Demonstração' : 'Operação Vendax'}</td>
+              <td className="p-2">{c.responsavel ?? '—'}</td>
+              <td className="p-2">{!c.demo && <Link className={link} href={`/clientes/memoria?cliente=${encodeURIComponent(c.id)}`}>Abrir ficha</Link>}</td>
+            </tr>)}
+          </tbody>
+        </table></div> : <Vazio>Nenhum cliente com estes filtros.</Vazio>}
+      </Secao>
       <Secao titulo="Tarefas" total={tarefas.length} id="tarefas">
         {tarefas.length ? <ul>{tarefas.map(t => <LinhaTarefa key={t.id} t={t} />)}</ul>
           : <Vazio acao={filtrado && <Link href="/clientes" className={link}>Limpar filtros</Link>}>Nenhuma tarefa{filtrado ? ' com estes filtros' : ''}.</Vazio>}

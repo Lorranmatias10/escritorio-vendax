@@ -5,7 +5,8 @@ import { prepararDados } from './seed';
 // Uma interface para os dois bancos: PGlite (Postgres embutido, local, sem Docker)
 // ou qualquer PostgreSQL (ex.: o serviço Postgres do EasyPanel) quando DATABASE_URL estiver definido.
 export type Q = { query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> };
-export type Banco = Q & { transacao<R>(fn: (q: Q) => Promise<R>): Promise<R>; exec(sql: string): Promise<void>; fechar(): Promise<void> };
+type Transacao = Q & { exec(sql: string): Promise<void> };
+export type Banco = Q & { transacao<R>(fn: (q: Transacao) => Promise<R>): Promise<R>; exec(sql: string): Promise<void>; fechar(): Promise<void> };
 
 async function abrirPglite(memoria: boolean): Promise<Banco> {
   const { PGlite } = await import('@electric-sql/pglite');
@@ -22,7 +23,10 @@ async function abrirPglite(memoria: boolean): Promise<Banco> {
     exec: async sql => { await db.exec(sql); },
     fechar: () => db.close(),
     // ponytail: PGlite tem uma conexão só; transações já ficam serializadas
-    transacao: fn => db.transaction(tx => fn({ query: async (sql, params) => (await tx.query(sql, params as unknown[])).rows as never })),
+    transacao: fn => db.transaction(tx => fn({
+      query: async (sql, params) => (await tx.query(sql, params as unknown[])).rows as never,
+      exec: async sql => { await tx.exec(sql); },
+    })),
   };
 }
 
@@ -37,7 +41,10 @@ async function abrirPostgres(url: string): Promise<Banco> {
       const c = await pool.connect();
       try {
         await c.query('begin');
-        const r = await fn({ query: async (sql, params) => (await c.query(sql, params as unknown[])).rows });
+        const r = await fn({
+          query: async (sql, params) => (await c.query(sql, params as unknown[])).rows,
+          exec: async sql => { await c.query(sql); },
+        });
         await c.query('commit');
         return r;
       } catch (e) { await c.query('rollback'); throw e; } finally { c.release(); }
@@ -46,14 +53,18 @@ async function abrirPostgres(url: string): Promise<Banco> {
 }
 
 async function migrar(b: Banco) {
-  await b.exec('create table if not exists schema_migrations (nome text primary key, aplicada_em timestamptz not null default now())');
   const dir = path.join(process.cwd(), 'db', 'migrations');
-  const feitas = new Set((await b.query<{ nome: string }>('select nome from schema_migrations')).map(r => r.nome));
-  for (const nome of readdirSync(dir).filter(f => f.endsWith('.sql')).sort()) {
-    if (feitas.has(nome)) continue;
-    await b.exec(readFileSync(path.join(dir, nome), 'utf8'));
-    await b.query('insert into schema_migrations (nome) values ($1)', [nome]);
-  }
+  await b.transacao(async q => {
+    // O lock transacional também protege o primeiro boot em duas réplicas.
+    await q.query('select pg_advisory_xact_lock($1)',[2026112101]);
+    await q.exec('create table if not exists schema_migrations (nome text primary key, aplicada_em timestamptz not null default now())');
+    const feitas = new Set((await q.query<{ nome: string }>('select nome from schema_migrations')).map(r => r.nome));
+    for (const nome of readdirSync(dir).filter(f => f.endsWith('.sql')).sort()) {
+      if (feitas.has(nome)) continue;
+      await q.exec(readFileSync(path.join(dir, nome), 'utf8'));
+      await q.query('insert into schema_migrations (nome) values ($1)', [nome]);
+    }
+  });
 }
 
 const g = globalThis as unknown as { __vxBanco?: Promise<Banco> };

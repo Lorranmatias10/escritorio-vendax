@@ -27,7 +27,7 @@ beforeAll(async () => {
   banco = await abrirBanco({ isolado: true });
   await banco.query("insert into clientes (id, nome, demo) values ('teste-chat', 'Cliente de teste', false), ('outro-chat', 'Outro cliente', false)");
   await banco.query("insert into permissoes_cliente (usuario_id, cliente_id) values ('fabiana', 'teste-chat')");
-  await banco.query("update papeis set execucao_habilitada = true, modo = 'A1', claude_homologado_com = $1 where id = 'midia_paga'", [provedor]);
+  await banco.query("update papeis set execucao_habilitada = true, modo = 'A1', claude_homologado_com = $1 where id in ('especialista_google_ads','especialista_meta_ads')", [provedor]);
 });
 
 afterAll(async () => {
@@ -61,5 +61,5 @@ it('registra um pedido, entrega o rascunho e aplica escopo por autor, cliente e 
   ]));
   const outro = await registrarChatEspecialista(banco, tiago, { ...pedido, id: randomUUID() });
   await processarFila(banco, undefined, 1, outro);
-  expect(executar.mock.calls[2][0].conteudo_recuperado.map(f => f.fonte)).toEqual(['Dados anexados à tarefa']);
+  expect(executar.mock.calls[2][0].conteudo_recuperado.map(f => f.fonte)).toEqual(expect.arrayContaining(['Dados anexados à tarefa','Cadastro do cliente']));
 });

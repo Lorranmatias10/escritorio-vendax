@@ -4,7 +4,12 @@ import type { Banco, Q } from './db';
 import { carregarUsuario, podeVer, SemAcesso, type Usuario } from './escopo';
 import { SaidaAgente, adaptadorConfigurado, adaptadorDoPapel, claudeHomologado, type AdaptadorModelo, type EntradaAgente } from './ia';
 import { fluxoDoPapel, type FluxoClaude } from './skills-claude';
-import { consultaAds, consultarAnuncios } from './consulta-ads';
+import { consultaAds } from './consulta-ads';
+import { confirmarIdentidadeConta, consultarFontes, pendenciasFontes, planoFontes } from './fontes-cliente';
+import { contasDoCliente, dadosContaCliente, dadosFichaCliente, fonteCliente,
+  obterFichaCliente, operacoesVendax, type FonteCliente } from './ficha-cliente';
+import { formularioRotina, horarioRotina, janelaRotina, periodoRotina, type Rotina } from './agenda-rotinas';
+import { dadosReuniaoDemo } from './demo';
 import { fontesDaMemoria } from './memoria-vendax';
 import type { z } from 'zod';
 import { DIRETOR, delegacoesRelatorioAds, equipeDiretor, fluxoDiretor, historicoDiretor,
@@ -81,23 +86,25 @@ export type EventoReuniao = { id: string; cliente_id: string; titulo: string; do
 export async function receberEventoReuniao(b: Banco, u: Usuario, ev: EventoReuniao) {
   if (!podeVer(u, ev.cliente_id, null)) throw new SemAcesso('Sem acesso ao cliente deste evento.');
   return b.transacao(async q => {
-    const [existente] = await q.query<{ id: string; origem_recebimentos: number }>('select id, origem_recebimentos from tarefas where origem_evento_id = $1', [ev.id]);
-    if (existente) {
-      // Evento repetido: mantém um registro só e atualiza a execução correspondente pelo identificador de origem.
-      const n = existente.origem_recebimentos + 1;
-      await q.query('update tarefas set origem_recebimentos = $2, atualizado_em = now() where id = $1', [existente.id, n]);
-      await q.query(`update execucoes set entrada = jsonb_set(entrada, '{contexto,recebimentos}', to_jsonb($2::int)), atualizado_em = now() where chave_dedup = $1`,
-        [`${existente.id}:gerente_contas:organizar`, n]);
-      await registrarEvento(q, existente.id, 'evento_repetido', `Evento de origem recebido de novo (${n}ª vez). Nenhum registro duplicado.`, u.nome, { origem: ev.id });
-      return { tarefaId: existente.id, repetido: true };
-    }
-    const [dono] = await q.query<{ nome: string }>('select nome from usuarios where id = $1', [ev.dono_id]);
+    const dono = await carregarUsuario(q,ev.dono_id);
+    if (!dono || !podeVer(dono,ev.cliente_id,null)) throw new SemAcesso('O responsável não tem acesso ao cliente deste evento.');
     const [t] = await q.query<{ id: string }>(
       `insert into tarefas (cliente_id, departamento_id, papel_atual_id, dono_humano_id, objetivo, fonte, origem_evento_id, prazo, estado, demo, criterio_conclusao, proximo_passo)
        values ($1,'contas','gerente_contas',$2,$3,$4,$5,$6,'na_fila',$7,$8,'Gerente de Contas organiza entregas e pendências')
-       returning id`,
+       on conflict (origem_evento_id) do nothing returning id`,
       [ev.cliente_id, ev.dono_id, `Briefing da carteira piloto · ${ev.titulo}`, `Reunião: ${ev.titulo}${ev.demo ? ' (evento sintético · Demonstração)' : ''}`,
        ev.id, ev.prazo, ev.demo, 'Decisão humana registrada sobre os prazos sem confirmação']);
+    if (!t) {
+      const [existente] = await q.query<{ id: string; origem_recebimentos: number }>(`update tarefas set
+        origem_recebimentos=origem_recebimentos+1, atualizado_em=now()
+        where origem_evento_id=$1 and cliente_id=$2 and demo=$3 and fonte like 'Reunião:%'
+        returning id,origem_recebimentos`,[ev.id,ev.cliente_id,ev.demo]);
+      if (!existente) throw new SemAcesso();
+      await q.query(`update execucoes set entrada=jsonb_set(entrada,'{contexto,recebimentos}',to_jsonb($2::int)), atualizado_em=now()
+        where chave_dedup=$1`,[`${existente.id}:gerente_contas:organizar`,existente.origem_recebimentos]);
+      await registrarEvento(q,existente.id,'evento_repetido',`Evento de origem recebido de novo (${existente.origem_recebimentos}ª vez).`,u.nome,{origem:ev.id});
+      return { tarefaId:existente.id,repetido:true };
+    }
     await registrarEvento(q, t.id, 'criada', `Tarefa criada a partir do evento de reunião ${ev.id}.`, 'sistema');
     await enfileirar(q, t.id, 'gerente_contas', 'organizar', {
       papel_id: 'gerente_contas', etapa: 'organizar',
@@ -114,18 +121,19 @@ export async function receberEventoReuniao(b: Banco, u: Usuario, ev: EventoReuni
 export type PedidoPapel = {
   id: string; papel_id: string; cliente_id: string | null; area_interna: string | null; dono_id: string; objetivo: string;
   conteudo_recuperado: EntradaAgente['conteudo_recuperado']; demo: boolean; fluxo_claude?: FluxoClaude; mensagem_chat?: string; consulta_ads?: z.infer<typeof consultaAds>;
+  fontes_integracoes?: FonteCliente[]; aprovador_id?: string; rotina?: boolean;
 };
 
-export async function receberPedido(b: Banco, u: Usuario, p: PedidoPapel) {
+export async function receberPedido(b: Banco, u: Usuario, p: PedidoPapel, transacao?: Q) {
   if (!podeVer(u, p.cliente_id, p.area_interna)) throw new SemAcesso('Sem acesso ao cliente ou à área deste pedido.');
-  return b.transacao(async q => {
+  const gravar = async (q: Q) => {
     const depto = await deptoDoPapel(q, p.papel_id);
     const [dono] = await q.query<{ nome: string }>('select nome from usuarios where id = $1', [p.dono_id]);
     const [t] = await q.query<{ id: string }>(
       `insert into tarefas (cliente_id, area_interna, departamento_id, papel_atual_id, dono_humano_id, objetivo, fonte, origem_evento_id, estado, demo, criterio_conclusao, proximo_passo)
        values ($1,$2,$3,$4,$5,$6,$7,$8,'na_fila',$9,'Dono humano revisou o rascunho do papel','Papel prepara o rascunho')
        on conflict (origem_evento_id) do nothing returning id`,
-      [p.cliente_id, p.area_interna, depto, p.papel_id, p.dono_id, p.objetivo, p.mensagem_chat ? 'Chat com especialista' : `Pedido ${p.id}${p.demo ? ' · Demonstração' : ''}`, p.id, p.demo]);
+      [p.cliente_id, p.area_interna, depto, p.papel_id, p.dono_id, p.objetivo, p.rotina ? 'Rotina agendada' : p.mensagem_chat ? 'Chat com especialista' : `Pedido ${p.id}${p.demo ? ' · Demonstração' : ''}`, p.id, p.demo]);
     if (!t) {
       const [existente] = await q.query<{ id: string; origem_recebimentos: number; cliente_id: string | null; area_interna: string | null }>(
         `update tarefas set origem_recebimentos = origem_recebimentos + 1, atualizado_em = now()
@@ -138,10 +146,12 @@ export async function receberPedido(b: Banco, u: Usuario, p: PedidoPapel) {
     await enfileirar(q, t.id, p.papel_id, 'analisar', {
       papel_id: p.papel_id, etapa: 'analisar',
       instrucao_operacional: `${p.mensagem_chat ?? p.objetivo}. Prepare a entrega do seu papel como rascunho para revisão. Não envie nada.`,
-      conteudo_recuperado: p.conteudo_recuperado, contexto: { dono_nome: dono?.nome, fluxo_claude: p.fluxo_claude, mensagem_chat: p.mensagem_chat, consulta_ads: p.consulta_ads },
+      conteudo_recuperado: p.conteudo_recuperado, contexto: { dono_nome: dono?.nome, fluxo_claude: p.fluxo_claude, mensagem_chat: p.mensagem_chat, consulta_ads: p.consulta_ads,
+        fontes_integracoes: p.fontes_integracoes, aprovador_id: p.aprovador_id, rotina: p.rotina },
     }, p.demo);
     return { tarefaId: t.id, repetido: false };
-  });
+  };
+  return transacao ? gravar(transacao) : b.transacao(gravar);
 }
 
 async function contextoDaConversa(q: Q, u: Usuario, canal: string | null, escopo: string | null) {
@@ -198,22 +208,23 @@ export async function registrarPedidoDiretor(b: Banco, u: Usuario, entrada: unkn
 }
 
 // ---------- Executor compartilhado pelas requisições e pela fila do Diretor ----------
-export async function processarFila(b: Banco, adaptador?: AdaptadorModelo, limite = 25, tarefaId?: string, somenteDiretor = false) {
+export async function processarFila(b: Banco, adaptador?: AdaptadorModelo, limite = 25, tarefaId?: string, somenteSegundoPlano = false) {
   const feitas: string[] = [];
   while (feitas.length < limite) {
     const lote = await b.query<ExecRow>(`with proxima as (
         select e.id, e.estado from execucoes e join tarefas t on t.id = e.tarefa_id
         where ((e.estado = 'na_fila' and e.disponivel_em <= now())
-          or (e.estado = 'em_execucao' and e.entrada->'contexto'->'diretor' = 'true'::jsonb and e.atualizado_em < now() - interval '5 minutes'))
-          and ($1::uuid is null or t.id = $1 or ($2 and t.parent_id = $1))
-          and (not $2 or e.entrada->'contexto'->'diretor' = 'true'::jsonb)
+          or (e.estado = 'em_execucao' and (e.entrada->'contexto'->'diretor' = 'true'::jsonb or e.entrada->'contexto'->'rotina' = 'true'::jsonb) and e.atualizado_em < now() - interval '5 minutes'))
+          and ($4 or e.entrada->'contexto'->'rotina' is distinct from 'true'::jsonb)
+          and ($1::uuid is null or t.id = $1 or t.parent_id = $1)
+          and (not $2 or e.entrada->'contexto'->'diretor' = 'true'::jsonb or e.entrada->'contexto'->'rotina' = 'true'::jsonb)
         order by e.criado_em, e.id limit $3 for update of e skip locked
       ) update execucoes e set estado = 'em_execucao', tentativas = tentativas + 1, atualizado_em = now()
         from proxima where e.id = proxima.id returning e.*, proxima.estado as estado_anterior`,
-      [tarefaId ?? null, somenteDiretor, Math.min(limite - feitas.length, somenteDiretor ? 4 : 1)]);
+      [tarefaId ?? null, somenteSegundoPlano, Math.min(limite - feitas.length, somenteSegundoPlano ? 4 : 1), rotinasLigadas()]);
     if (!lote.length) break;
     await Promise.all(lote.map(async ex => {
-      if (ex.entrada.contexto.diretor === true && ex.tentativas > 2 && ex.estado_anterior === 'em_execucao') {
+      if ((ex.entrada.contexto.diretor === true || ex.entrada.contexto.rotina === true) && ex.tentativas > 2 && ex.estado_anterior === 'em_execucao') {
         await finalizarFalha(b, ex, 'O servidor interrompeu as tentativas anteriores de execução.', 'falhou');
         return;
       }
@@ -263,10 +274,15 @@ async function executar(b: Banco, ex: ExecRow, adaptador: AdaptadorModelo) {
     await registrarEvento(b, ex.tarefa_id, 'execucao_iniciada', `${papel.nome} iniciou a etapa "${ex.etapa}".`, ex.papel_id);
     const entradaAnterior = await recuperarEscopoDoPedido(b, ex);
     const entrada = await prepararEntrada(b, entradaAnterior ? { ...ex, entrada: entradaAnterior } : ex);
+    const semConta = entrada.conteudo_recuperado.filter(f => f.disponivel === false && f.texto.startsWith('Conta de '));
+    if (semConta.length) {
+      await finalizarFalha(b, ex, semConta.map(f => f.texto).join(' · '), 'bloqueada');
+      return;
+    }
     const saida = garantirContrato(entrada, SaidaAgente.parse(await adaptador.executar(entrada, instr ?? null, tentativa)), papel);
     await b.transacao(async q => {
       if (!await execucaoAtual(q, ex)) return;
-      const retorno = await aplicarEfeitos(q, diretor ? { ...ex, entrada } : ex, saida, papel);
+      const retorno = await aplicarEfeitos(q, { ...ex, entrada }, saida, papel);
       await q.query(`update execucoes set estado = 'concluida', saida = $2, erro = null, concluido_em = now(), atualizado_em = now() where id = $1`, [ex.id, retorno ?? saida]);
       await registrarEvento(q, ex.tarefa_id, 'execucao_concluida', `${papel.nome} concluiu "${ex.etapa}" (tentativa ${tentativa}).`, ex.papel_id);
       if (diretor && ex.etapa === 'analisar') await filaDeRetorno(q, await carregarTarefa(q, ex.tarefa_id));
@@ -337,10 +353,19 @@ async function prepararEntrada(q: Q, ex: ExecRow): Promise<EntradaAgente> {
   if (!podeVer(autor, t.cliente_id, t.area_interna)) throw new SemAcesso('Acesso do responsável ao escopo da tarefa está indisponível.');
   const fontes = ex.entrada.contexto.relatorio_ads === true
     ? [] : await fontesDaMemoria(q, autor, t.cliente_id, t.area_interna, t.id);
-  const p = consultaAds.safeParse(ex.entrada.contexto.consulta_ads);
+  const periodo = consultaAds.safeParse(ex.entrada.contexto.consulta_ads).data;
   const plataforma = ex.entrada.contexto.fluxo_claude;
-  if (p.success && t.cliente_id && (plataforma === 'google_ads' || plataforma === 'meta_ads') && fluxoDoPapel(plataforma, ex.papel_id)) {
-    fontes.push(await consultarAnuncios(q, autor, t.cliente_id, plataforma, p.data));
+  const escolhidas = Array.isArray(ex.entrada.contexto.fontes_integracoes)
+    ? ex.entrada.contexto.fontes_integracoes.filter((f): f is FonteCliente => fonteCliente.safeParse(f).success) : [];
+  if (periodo && t.cliente_id && (plataforma === 'google_ads' || plataforma === 'meta_ads') && fluxoDoPapel(plataforma, ex.papel_id))
+    escolhidas.push(plataforma === 'google_ads' ? 'google-ads' : 'meta-ads');
+  if (escolhidas.length) {
+    const pedido = ex.entrada.contexto.mensagem_chat ?? ex.entrada.contexto.pedido_original ?? t.objetivo;
+    const plano = await planoFontes(q, autor, t.cliente_id, t.area_interna, [...new Set(escolhidas)], ex.papel_id,
+      ex.entrada.contexto.rotina === true ? undefined : String(pedido));
+    const pendencias = pendenciasFontes(plano,t.cliente_id);
+    const data = periodo ?? periodoAdsPadrao();
+    fontes.push(...(pendencias.length ? pendencias : await consultarFontes(q,plano,data)));
   }
   const contexto = { ...ex.entrada.contexto };
   if (ex.etapa === 'diretor_triagem' || ex.etapa === 'diretor_revisao') {
@@ -360,12 +385,15 @@ function garantirContrato(e: EntradaAgente, s: SaidaAgente, papel: Papel): Saida
   for (const c of e.conteudo_recuperado) {
     const disp = c.disponivel !== false;
     const f = fontes.find(x => x.nome === c.fonte);
-    if (f) f.disponivel = disp; else fontes.push({ nome: c.fonte, disponivel: disp });
+    if (f) {
+      f.disponivel = disp;
+      if (c.identificador) f.referencia = c.identificador;
+    } else fontes.push({ nome: c.fonte, disponivel: disp, referencia: c.identificador });
   }
   const lacunas = [...s.lacunas];
   for (const c of e.conteudo_recuperado.filter(c => c.disponivel === false))
     if (!lacunas.some(l => l.includes(c.fonte) && /Integração pendente/i.test(l)))
-      lacunas.push(`${c.fonte}: Integração pendente${c.resolve ? ` — quem resolve: ${c.resolve}` : ''}`);
+      lacunas.push(c.texto || `${c.fonte}: Integração pendente${c.resolve ? ` — quem resolve: ${c.resolve}` : ''}`);
   // A1 = consulta e rascunho: nada foi executado, então não há efeito confirmado.
   // Parecer e gravidade são do Auditor de Qualidade; em outras etapas o sistema descarta.
   const auditoria = e.etapa === 'auditar';
@@ -403,7 +431,7 @@ async function aplicarEfeitos(q: Q, ex: ExecRow, s: SaidaAgente, papel: Papel) {
     await delegar(q, t, ex.papel_id, 'auditor_qualidade', 'auditar', 'Auditar o plano da carteira contra a reunião', {
       ...ex.entrada, papel_id: 'auditor_qualidade', etapa: 'auditar',
       instrucao_operacional: 'Confira o plano com a fonte. Aponte prazos, números ou escopos sem confirmação.',
-      conteudo_recuperado: [...ex.entrada.conteudo_recuperado, { fonte: 'Relatório de performance (Reportei)', texto: '', disponivel: false, resolve: 'Lorran (integrações)' }],
+      conteudo_recuperado: [...ex.entrada.conteudo_recuperado, ...(t.demo ? [dadosReuniaoDemo.fonteAusente] : [])],
     });
   } else if (ex.etapa === 'auditar') {
     await concluirSub();
@@ -411,33 +439,47 @@ async function aplicarEfeitos(q: Q, ex: ExecRow, s: SaidaAgente, papel: Papel) {
       await evidencia(q, pai.id, ex.id, `${ex.id}:achado:${i}`, 'fonte', `Auditor: ${a.texto}`, 'Transcrição da reunião');
     await delegar(q, pai, ex.papel_id, 'diretor_operacoes', 'priorizar', 'Priorizar o briefing e definir quem decide', {
       ...ex.entrada, papel_id: 'diretor_operacoes', etapa: 'priorizar',
-      instrucao_operacional: 'Priorize, atribua quem decide e coloque o briefing em Hoje. Nenhuma ação externa.',
+      instrucao_operacional: 'Priorize o briefing. Se houver prazo a confirmar, redija uma mensagem baseada na transcrição para revisão interna. Nenhuma ação externa.',
       contexto: { ...ex.entrada.contexto, lacunas: s.lacunas,
-        mensagem_sugerida: 'Olá! Confirmando o combinado na reunião: a landing page de implantes fica pronta até sexta-feira. Podemos considerar esse prazo?' },
+        ...(t.demo ? { mensagem_sugerida: dadosReuniaoDemo.mensagem } : {}) },
     });
   } else if (ex.etapa === 'priorizar') {
     await concluirSub();
     const prazo = new Date(Date.now() + 2 * 86_400_000).toISOString();
+    const dono = pai.dono_humano_id ? await carregarUsuario(q,pai.dono_humano_id) : null;
+    const ficha = pai.cliente_id && dono && !pai.demo ? await obterFichaCliente(q,dono,pai.cliente_id) : null;
+    const destinatario = pai.demo ? dadosReuniaoDemo.destinatario : ficha?.contato_whatsapp;
+    const rascunho = s.rascunho?.trim();
+    if (!pai.demo && (!destinatario || !rascunho)) {
+      const motivo = !destinatario ? 'Contato de WhatsApp ausente na ficha do cliente - quem resolve: direção' : 'Rascunho da reunião ausente - quem resolve: responsável pela tarefa';
+      await q.query("update tarefas set estado='bloqueada', em_hoje=true, motivo_bloqueio=$2, atualizado_em=now() where id=$1", [pai.id,motivo]);
+      await registrarEvento(q,pai.id,'fonte_ausente',motivo,DIRETOR);
+      return;
+    }
     await q.query(
       `update tarefas set estado = 'aguardando_aprovacao', em_hoje = true, papel_atual_id = 'diretor_operacoes', prazo = $2, motivo_bloqueio = null, proximo_passo = $3, atualizado_em = now() where id = $1`,
       [pai.id, prazo, s.proxima_acao]);
     await q.query(
-      `insert into aprovacoes (tarefa_id, chave_dedup, intencao, alvo, conta, parametros, prazo, aprovador_id, demo)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (chave_dedup) do nothing`,
-      [pai.id, `${pai.id}:aprovacao:confirmar-prazo`, 'Enviar ao cliente a confirmação do prazo da landing page',
-       'WhatsApp · contato fictício da Clínica Aurora', 'WhatsApp oficial Vendax (Demonstração)',
-       { canal: 'whatsapp', destinatario: 'Contato fictício da Clínica Aurora', mensagem: s.rascunho, envio: 'imediato após aprovação' },
-       prazo, pai.dono_humano_id, pai.demo]);
+      `insert into aprovacoes (tarefa_id, chave_dedup, intencao, alvo, conta, parametros, prazo, aprovador_id, demo, modo)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) on conflict (chave_dedup) do nothing`,
+      [pai.id, `${pai.id}:aprovacao:confirmar-prazo`, pai.demo ? dadosReuniaoDemo.intencao : 'Revisar o rascunho de confirmação da reunião',
+       pai.demo ? dadosReuniaoDemo.alvo : 'Revisão interna', pai.demo ? dadosReuniaoDemo.conta : 'Escritório Vendax',
+       { canal: 'whatsapp', destinatario, contato: ficha?.contato_nome, mensagem: rascunho },
+       prazo, pai.dono_humano_id, pai.demo, pai.demo ? 'A3' : 'A1']);
     await registrarEvento(q, pai.id, 'em_hoje', `Briefing priorizado e colocado em Hoje. Quem decide: ${s.responsavel_humano}.`, 'diretor_operacoes');
   } else if (ex.etapa === 'analisar' && !ex.entrada.conteudo_recuperado.some(c => c.disponivel === false)) {
     // A1: o rascunho fica como evidência e o dono humano revisa. Nenhuma ação externa.
     // Bloqueio por fonte ausente vem do que o sistema entregou; lacunas que o modelo apontar ficam no rascunho para o revisor.
-    await q.query(`update tarefas set estado = 'aguardando_aprovacao', motivo_bloqueio = null, proximo_passo = $2, atualizado_em = now() where id = $1`, [t.id, s.proxima_acao]);
+    const prazo = new Date(Date.now() + 2 * 86_400_000).toISOString();
+    const emHoje = ex.entrada.contexto.rotina === true;
+    await q.query(`update tarefas set estado = 'aguardando_aprovacao', motivo_bloqueio = null, proximo_passo = $2,
+      em_hoje = $3 or em_hoje, prazo = case when $3 then coalesce(prazo,$4) else prazo end, atualizado_em = now() where id = $1`,
+    [t.id, s.proxima_acao, emHoje, prazo]);
     await q.query(
-      `insert into aprovacoes (tarefa_id, chave_dedup, intencao, alvo, conta, parametros, prazo, aprovador_id, demo)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (chave_dedup) do nothing`,
+      `insert into aprovacoes (tarefa_id, chave_dedup, intencao, alvo, conta, parametros, prazo, aprovador_id, demo, modo)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'A1') on conflict (chave_dedup) do nothing`,
       [t.id, `${t.id}:aprovacao:revisar`, `Revisar o rascunho de ${papel.nome}`, 'Revisão interna', 'Escritório Vendax',
-       { rascunho: s.rascunho ?? s.resumo, papel_destino: s.papel_destino }, new Date(Date.now() + 2 * 86_400_000).toISOString(), t.dono_humano_id, t.demo]);
+       { rascunho: s.rascunho ?? s.resumo, papel_destino: s.papel_destino }, prazo, ex.entrada.contexto.aprovador_id ?? t.dono_humano_id, t.demo]);
   } else if (ex.etapa === 'consultar_fonte' || ex.etapa === 'analisar') { // analisar com fonte ausente: bloqueia e aponta quem resolve
     await q.query(`update tarefas set estado = 'bloqueada', motivo_bloqueio = $2, proximo_passo = $3, atualizado_em = now() where id = $1`,
       [t.id, s.lacunas.join(' · '), s.proxima_acao]);
@@ -480,7 +522,7 @@ async function delegarDiretor(q: Q, t: TarefaRow, ex: ExecRow, s: SaidaAgente) {
       instrucao_operacional: `Pedido delegado pelo Diretor Geral: ${objetivo}\nUse a conta e o cliente da tarefa. Cite as fontes e separe dados, lacunas e recomendações.`,
       conteudo_recuperado: [],
       contexto: { diretor: true, dono_nome: u.nome, objetivo_delegado: objetivo, fluxo_claude: fluxo,
-        consulta_ads: canalAds ? periodos : undefined, relatorio_ads: relatorioAds, relatorio_reaberto },
+        consulta_ads: canalAds ? periodos : undefined, relatorio_ads: relatorioAds, relatorio_reaberto, pedido_original: mensagem },
     });
   }
   const papeisIndisponiveis = destinos.some(([p]) => !autorizados.has(p));
@@ -518,7 +560,8 @@ async function filaDeRetorno(q: Q, tarefa: TarefaRow, triagem?: Record<string, u
         analise: a.saida?.rascunho?.slice(0, 6000), fontes: a.saida?.fontes, lacunas: a.saida?.lacunas }).slice(0, 10_000),
     }))],
     contexto: { ...origem.entrada.contexto, ...plano,
-      apoios_incompletos: apoios.filter(a => a.estado !== 'concluida').map(a => a.nome) },
+      apoios_incompletos: apoios.filter(a => a.estado !== 'concluida').map(a => a.nome),
+      bloqueios_fontes: apoios.map(a => a.motivo_bloqueio).filter(m => m?.startsWith('Conta de ')) },
   };
 
   const nova = await enfileirar(q, raiz, DIRETOR, 'diretor_revisao', entrada, false);
@@ -536,9 +579,10 @@ async function filaDeRetorno(q: Q, tarefa: TarefaRow, triagem?: Record<string, u
 }
 
 async function fecharPedidoDiretor(q: Q, t: TarefaRow, ex: ExecRow, s: SaidaAgente): Promise<SaidaAgente> {
-  const { papeisIndisponiveis, apoios_incompletos } = ex.entrada.contexto;
+  const { papeisIndisponiveis, apoios_incompletos, bloqueios_fontes } = ex.entrada.contexto;
   const incompletos = Array.isArray(apoios_incompletos) ? apoios_incompletos : [];
   const bloqueio = [
+    ...(Array.isArray(bloqueios_fontes) ? bloqueios_fontes : []),
     s.pendencia_diretor,
     papeisIndisponiveis ? 'Um especialista solicitado está indisponível neste escopo.' : '',
     incompletos.length ? `Apoio pendente de ${incompletos.join(', ')}.` : '',
@@ -635,12 +679,13 @@ export async function retomarExecucao(b: Banco, u: Usuario, execId: string) {
 
 // ---------- Aprovações (A3) ----------
 export async function decidirAprovacao(b: Banco, u: Usuario, aprovacaoId: string, decisao: 'aprovada' | 'rejeitada', nota: string) {
-  const [ap] = await b.query<{ id: string; tarefa_id: string; aprovador_id: string; estado: string; prazo: string; intencao: string }>('select * from aprovacoes where id = $1', [aprovacaoId]);
-  if (!ap) throw new SemAcesso();
-  await autorizarTarefa(b, u, ap.tarefa_id);
-  if (u.id !== ap.aprovador_id && u.perfil !== 'admin') throw new SemAcesso('Somente o aprovador designado ou a direção pode decidir.');
-  if (ap.estado !== 'pendente') return { estado: ap.estado, externa: 'desabilitada_v1' as const };
   return b.transacao(async q => {
+    const [ap] = await q.query<{ id: string; tarefa_id: string; aprovador_id: string; estado: string; prazo: string; intencao: string; modo: string; alvo: string }>(
+      'select * from aprovacoes where id = $1 for update', [aprovacaoId]);
+    if (!ap) throw new SemAcesso();
+    await autorizarTarefa(q, u, ap.tarefa_id);
+    if (u.id !== ap.aprovador_id && u.perfil !== 'admin') throw new SemAcesso('Somente o aprovador designado ou a direção pode decidir.');
+    if (ap.estado !== 'pendente') return { estado: ap.estado, externa: 'desabilitada_v1' as const };
     if (new Date(ap.prazo) < new Date()) {
       await q.query(`update aprovacoes set estado = 'expirada' where id = $1`, [ap.id]);
       await registrarEvento(q, ap.tarefa_id, 'aprovacao_expirada', 'Aprovação expirada: o prazo passou antes da decisão.', 'sistema');
@@ -648,13 +693,14 @@ export async function decidirAprovacao(b: Banco, u: Usuario, aprovacaoId: string
     }
     await q.query(`update aprovacoes set estado = $2, decisao_nota = $3, decidido_por = $4, decidido_em = now() where id = $1`, [ap.id, decisao, nota || null, u.id]);
     await registrarEvento(q, ap.tarefa_id, 'aprovacao_decidida', `${u.nome} ${decisao === 'aprovada' ? 'aprovou' : 'rejeitou'}: ${ap.intencao}.`, u.nome, { nota });
-    // V1: nenhuma ação externa roda, nem depois da aprovação.
-    await registrarEvento(q, ap.tarefa_id, 'acao_externa_bloqueada', 'Execução externa desabilitada na V1: nada foi enviado. A decisão ficou registrada.', 'sistema');
-    if (decisao === 'aprovada')
+    const revisaoInterna = ap.modo === 'A1' || ap.alvo === 'Revisão interna';
+    if (!revisaoInterna) await registrarEvento(q, ap.tarefa_id, 'acao_externa_bloqueada', 'Execução externa desabilitada na V1: nada foi enviado. A decisão ficou registrada.', 'sistema');
+    if (!revisaoInterna && decisao === 'aprovada')
       await evidencia(q, ap.tarefa_id, null, `${ap.id}:acao_solicitada`, 'acao_solicitada', `${ap.intencao} — aprovada por ${u.nome}; não executada (V1, sem resultado confirmado).`);
     // Critério de conclusão da tarefa de origem: decisão humana registrada.
     await q.query(`update tarefas set estado = 'concluida', proximo_passo = $2, atualizado_em = now() where id = $1`,
-      [ap.tarefa_id, decisao === 'aprovada' ? 'Enviar manualmente pela conta oficial, se ainda necessário (execução externa desabilitada na V1).' : 'Decisão registrada: não enviar. Definir nova abordagem com o cliente.']);
+      [ap.tarefa_id, revisaoInterna ? (decisao === 'aprovada' ? 'Rascunho revisado e aprovado.' : 'Revisão registrada. Ajuste o rascunho se necessário.')
+        : decisao === 'aprovada' ? 'Enviar manualmente pela conta oficial, se ainda necessário (execução externa desabilitada na V1).' : 'Decisão registrada: não enviar. Definir nova abordagem com o cliente.']);
     await registrarEvento(q, ap.tarefa_id, 'concluida', 'Critério de conclusão atendido: decisão humana registrada.', 'sistema');
     return { estado: decisao, externa: 'desabilitada_v1' as const };
   });
@@ -704,5 +750,210 @@ export async function desabilitarPapel(b: Banco, u: Usuario, papelId: string, mo
     const r = await q.query(`update papeis set estado_config = 'desabilitado', execucao_habilitada = false where id = $1 returning id`, [papelId]);
     if (!r.length) throw new Error(`Papel desconhecido: ${papelId}`);
     await registrarConfiguracao(q, papelId, 'desabilitado', motivo || 'Sem motivo informado.', u.nome);
+  });
+}
+
+// ---------- Ficha e contas vinculadas ----------
+function exigirDirecao(u: Usuario) {
+  if (u.perfil !== 'admin') throw new SemAcesso('Somente a direção pode fazer esta alteração.');
+}
+
+async function registroCliente(q: Q, u: Usuario, cliente: string, acao: string, detalhe: string) {
+  await q.query('insert into clientes_auditoria (cliente_id,acao,detalhe,ator_id) values ($1,$2,$3,$4)',[cliente,acao,detalhe,u.id]);
+}
+
+export async function atualizarFichaCliente(b: Banco, u: Usuario, cliente: string, entrada: unknown) {
+  exigirDirecao(u);
+  const f = dadosFichaCliente.parse(entrada);
+  if ((f.status === null) !== operacoesVendax.includes(cliente)) throw new Error('Selecione um status válido.');
+  return b.transacao(async q => {
+    const [anterior] = await q.query<{ status: string | null }>('select status from clientes where id=$1 and not demo for update',[cliente]);
+    if (!anterior) throw new SemAcesso();
+    if (f.responsavel_id) {
+      const responsavel = await carregarUsuario(q,f.responsavel_id);
+      if (!responsavel || !podeVer(responsavel,cliente,null)) throw new Error('O responsável precisa ter acesso ao cliente.');
+    }
+    const rows = await q.query(`update clientes set status=$2,responsavel_id=$3,contato_nome=$4,contato_whatsapp=$5
+      where id=$1 and (status,responsavel_id,contato_nome,contato_whatsapp) is distinct from ($2,$3,$4,$5) returning id`,
+      [cliente,f.status,f.responsavel_id,f.contato_nome,f.contato_whatsapp]);
+    if (rows.length) await registroCliente(q,u,cliente,'ficha_atualizada',
+      anterior.status === f.status ? 'Responsável ou contato atualizado.' : `Status: ${anterior.status ?? 'interno'} → ${f.status ?? 'interno'}.`);
+  });
+}
+
+export async function gravarVinculoCliente(b: Banco, u: Usuario, cliente: string, entrada: unknown, edicao?: { id: string; versao: number }) {
+  exigirDirecao(u);
+  const a = dadosContaCliente.parse(entrada);
+  if (a.integracao === 'crm' && a.tipo === 'espaco_crm' && a.identificador === process.env.CRM_VENDAX_ESPACO_COMERCIAL_ID?.trim())
+    throw new Error('O espaço reservado ao comercial da Vendax não pode ser vinculado a um cliente.');
+  return b.transacao(async q => {
+    const [c] = await q.query('select id from clientes where id=$1 and not demo for update',[cliente]);
+    if (!c) throw new SemAcesso();
+    if (!edicao) {
+      const rows = await q.query<{ id: string }>(`insert into contas_cliente (cliente_id,integracao,tipo,identificador,rotulo)
+        values ($1,$2,$3,$4,$5) on conflict (integracao,tipo,identificador) do nothing returning id`,
+      [cliente,a.integracao,a.tipo,a.identificador,a.rotulo]);
+      if (rows.length) await registroCliente(q,u,cliente,'conta_criada',`${a.integracao} · ${a.identificador}`);
+      else if (!(await q.query('select id from contas_cliente where cliente_id=$1 and integracao=$2 and tipo=$3 and identificador=$4',
+        [cliente,a.integracao,a.tipo,a.identificador])).length) throw new Error('Este identificador já está vinculado a outro cliente.');
+      return;
+    }
+    const [anterior] = await q.query<{ integracao: string; tipo: string; identificador: string; rotulo: string; versao: number }>(
+      'select integracao,tipo,identificador,rotulo,versao from contas_cliente where cliente_id=$1 and id=$2 for update',[cliente,edicao.id]);
+    if (!anterior || anterior.versao !== edicao.versao) throw new Error('O vínculo mudou. Atualize a página e tente de novo.');
+    const mudou = [anterior.integracao,anterior.tipo,anterior.identificador].some((v,i) => v !== [a.integracao,a.tipo,a.identificador][i]);
+    if (!mudou && anterior.rotulo === a.rotulo) return;
+    await q.query(`update contas_cliente set integracao=$3,tipo=$4,identificador=$5,rotulo=$6,versao=versao+1,
+      verificado_em=case when $7 then null else verificado_em end,verificado_por=case when $7 then null else verificado_por end
+      where cliente_id=$1 and id=$2`,[cliente,edicao.id,a.integracao,a.tipo,a.identificador,a.rotulo,mudou]);
+    await registroCliente(q,u,cliente,'conta_editada',`${anterior.integracao} · ${anterior.identificador} → ${a.integracao} · ${a.identificador}`);
+  });
+}
+
+export async function retirarVinculoCliente(b: Banco, u: Usuario, cliente: string, id: string, versao: number) {
+  exigirDirecao(u);
+  await b.transacao(async q => {
+    const [a] = await q.query<{ integracao: string; identificador: string }>(`delete from contas_cliente
+      where cliente_id=$1 and id=$2 and versao=$3 returning integracao,identificador`,[cliente,id,versao]);
+    if (a) await registroCliente(q,u,cliente,'conta_removida',`${a.integracao} · ${a.identificador}`);
+    else if ((await q.query('select id from contas_cliente where cliente_id=$1 and id=$2',[cliente,id])).length)
+      throw new Error('O vínculo mudou. Atualize a página e tente de novo.');
+  });
+}
+
+export async function verificarVinculoCliente(b: Banco, u: Usuario, cliente: string, id: string, versao: number) {
+  exigirDirecao(u);
+  const a = (await contasDoCliente(b,u,cliente)).find(c => c.id === id && c.versao === versao);
+  if (!a) throw new Error('O vínculo mudou. Atualize a página e tente de novo.');
+  await confirmarIdentidadeConta(b,a);
+  await b.transacao(async q => {
+    const [atualizada] = await q.query(`update contas_cliente set verificado_em=now(),verificado_por=$3,versao=versao+1
+      where cliente_id=$1 and id=$2 and versao=$4 returning id`,[cliente,id,u.id,versao]);
+    if (!atualizada) throw new Error('O vínculo mudou durante a verificação. Tente de novo.');
+    await registroCliente(q,u,cliente,'conta_verificada',`${a.integracao} · ${a.identificador}`);
+  });
+}
+
+// ---------- Rotinas: mesma fila e mesma entrada dos pedidos manuais ----------
+export function rotinasLigadas() {
+  return process.env.VX_ROTINAS === 'ligado';
+}
+
+function limiteDisparos() {
+  const limite = Number(process.env.VX_ROTINAS_LIMITE_HORA);
+  return Number.isSafeInteger(limite) && limite > 0 ? limite : 20;
+}
+
+async function validarEscopoRotina(q: Q, r: Pick<Rotina,'cliente_id'|'area_interna'|'dono_id'|'aprovador_id'>) {
+  const [dono,aprovador] = await Promise.all([carregarUsuario(q,r.dono_id),carregarUsuario(q,r.aprovador_id)]);
+  if (!dono || !podeVer(dono,r.cliente_id,r.area_interna) || !aprovador || !podeVer(aprovador,r.cliente_id,r.area_interna))
+    throw new Error('O dono e o aprovador precisam ter acesso ao escopo da rotina.');
+  return dono;
+}
+
+export async function salvarRotina(b: Banco, u: Usuario, entrada: unknown, id?: string, agora = new Date()) {
+  exigirDirecao(u);
+  const r = formularioRotina.parse(entrada);
+  return b.transacao(async q => {
+    await validarEscopoRotina(q,r);
+    if (r.cliente_id && !await obterFichaCliente(q,u,r.cliente_id)) throw new Error('Cliente indisponível.');
+    const args = [r.nome,r.papel_id,r.cliente_id,r.area_interna,r.dono_id,r.aprovador_id,r.objetivo,r.fontes,
+      r.frequencia,r.dia,r.hora,r.inclui_sazonal];
+    if (id) {
+      const [linha] = await q.query<Rotina>('select * from rotinas where id=$1 for update',[id]);
+      if (!linha) throw new Error('Rotina indisponível.');
+      const agendaMudou = linha.frequencia !== r.frequencia || linha.dia !== r.dia || linha.hora.slice(0,5) !== r.hora;
+      const proxima = linha.ativa && agendaMudou ? horarioRotina(r,agora,'proxima').toISOString() : linha.proxima_execucao;
+      await q.query(`update rotinas set nome=$1,papel_id=$2,cliente_id=$3,area_interna=$4,dono_id=$5,aprovador_id=$6,objetivo=$7,
+        fontes=$8,frequencia=$9,dia=$10,hora=$11,inclui_sazonal=$12,proxima_execucao=$13 where id=$14`,[...args,proxima,id]);
+      return id;
+    }
+    const [criada] = await q.query<{ id: string }>(`insert into rotinas (nome,papel_id,cliente_id,area_interna,dono_id,aprovador_id,objetivo,
+      fontes,frequencia,dia,hora,inclui_sazonal,chave_dedup) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      on conflict (chave_dedup) do nothing returning id`,[...args,r.chave_dedup]);
+    if (criada) return criada.id;
+    const [existente] = await q.query<{ id: string }>('select id from rotinas where chave_dedup=$1',[r.chave_dedup]);
+    return existente.id;
+  });
+}
+
+export async function definirRotinaAtiva(b: Banco, u: Usuario, id: string, ativa: boolean, agora = new Date()) {
+  exigirDirecao(u);
+  await b.transacao(async q => {
+    const [r] = await q.query<Rotina>('select * from rotinas where id=$1 for update',[id]);
+    if (!r) throw new Error('Rotina indisponível.');
+    if (r.ativa === ativa) return;
+    const proxima = ativa ? horarioRotina(r,agora,'proxima').toISOString() : null;
+    await q.query('update rotinas set ativa=$2,proxima_execucao=$3 where id=$1',[id,ativa,proxima]);
+  });
+}
+
+type Disparo = { tarefaId: string | null; motivo: string };
+
+async function dispararRotina(b: Banco, q: Q, r: Rotina, janela: string, origem: 'manual' | 'agenda', agora: Date): Promise<Disparo> {
+  const [anterior] = await q.query<{ tarefa_id: string }>(
+    "select tarefa_id from rotinas_execucoes where rotina_id=$1 and janela=$2 and estado='disparada'",[r.id,janela]);
+  if (anterior) return { tarefaId: anterior.tarefa_id, motivo: 'Já disparada nesta janela.' };
+  const log = async (motivo: string, tarefaId: string | null = null) => {
+    await q.query(`insert into rotinas_execucoes (rotina_id,janela,origem,estado,motivo,tarefa_id,criado_em)
+      values ($1,$2,$3,$4,$5,$6,$7) on conflict do nothing`,[r.id,janela,origem,tarefaId ? 'disparada' : 'ignorada',motivo,tarefaId,agora.toISOString()]);
+    return { tarefaId,motivo };
+  };
+  if (!r.ativa) return log('Rotina desligada.');
+  const [papel] = await q.query<Papel>('select * from papeis where id=$1 for share',[r.papel_id]);
+  if (!papel?.execucao_habilitada || papel.estado_config !== 'habilitado' || papel.modo !== 'A1')
+    return log('Papel desabilitado ou fora de A1.');
+  if (papel.homologado_com !== adaptadorConfigurado().provedor) return log('Papel não homologado com o provedor atual.');
+  let dono: Usuario;
+  try {
+    dono = await validarEscopoRotina(q,r);
+  } catch {
+    return log('Dono ou aprovador sem acesso ao escopo.');
+  }
+  if (r.cliente_id) {
+    const [c] = await q.query<{ status: string | null }>('select status from clientes where id=$1 and not demo for share',[r.cliente_id]);
+    if (c?.status !== 'ativo' && !(r.inclui_sazonal && c?.status === 'sazonal'))
+      return log(c?.status ? `Rotina não habilitada para cliente com status ${c.status}.` : 'Cliente indisponível.');
+  }
+  const plano = await planoFontes(q,dono,r.cliente_id,r.area_interna,r.fontes,r.papel_id);
+  const pendencias = pendenciasFontes(plano,r.cliente_id);
+  if (pendencias.length) return log(pendencias.map(p => p.texto).join(' · '));
+  const [usados] = await q.query<{ n: number }>(`select count(*)::int n from rotinas_execucoes
+    where estado='disparada' and criado_em > $1::timestamptz - interval '1 hour'`,[agora.toISOString()]);
+  if (usados.n >= limiteDisparos()) return log('Limite geral de disparos na última hora atingido.');
+  const { tarefaId } = await receberPedido(b,dono,{
+    id: `rotina:${r.id}:${janela}`, papel_id: r.papel_id, cliente_id: r.cliente_id, area_interna: r.area_interna,
+    dono_id: r.dono_id, aprovador_id: r.aprovador_id, objetivo: r.objetivo, fontes_integracoes: r.fontes,
+    rotina: true, conteudo_recuperado: [], demo: false,
+    consulta_ads: periodoRotina(r,origem === 'agenda' ? horarioRotina(r,agora,'ultima') : agora),
+  },q);
+  await q.query('update rotinas set ultima_execucao=$2 where id=$1',[r.id,agora.toISOString()]);
+  return log('Tarefa criada na fila A1.',tarefaId);
+}
+
+export async function rodarRotinaAgora(b: Banco, u: Usuario, id: string, agora = new Date()): Promise<Disparo> {
+  exigirDirecao(u);
+  if (!rotinasLigadas()) return { tarefaId: null, motivo: 'Agendador desligado (VX_ROTINAS).' };
+  return b.transacao(async q => {
+    await q.query('select id from rotinas_controle where id for update');
+    const [r] = await q.query<Rotina>('select * from rotinas where id=$1 for update',[id]);
+    if (!r) throw new Error('Rotina indisponível.');
+    return dispararRotina(b,q,r,janelaRotina(r,agora),'manual',agora);
+  });
+}
+
+export async function dispararRotinasVencidas(b: Banco, agora = new Date()) {
+  if (!rotinasLigadas()) return [];
+  return b.transacao(async q => {
+    await q.query('select id from rotinas_controle where id for update');
+    const vencidas = await q.query<Rotina>(`select * from rotinas where ativa and proxima_execucao <= $1
+      order by proxima_execucao,id for update skip locked`,[agora.toISOString()]);
+    const resultados: Disparo[] = [];
+    for (const r of vencidas) {
+      const janela = janelaRotina(r,horarioRotina(r,agora,'ultima'));
+      resultados.push(await dispararRotina(b,q,r,janela,'agenda',agora));
+      await q.query('update rotinas set proxima_execucao=$2 where id=$1',[r.id,horarioRotina(r,agora,'proxima').toISOString()]);
+    }
+    return resultados;
   });
 }

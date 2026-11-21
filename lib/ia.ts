@@ -32,7 +32,7 @@ export type EntradaAgente = {
   papel_id: string;
   etapa: string;
   instrucao_operacional: string;
-  conteudo_recuperado: { fonte: string; texto: string; disponivel?: boolean; resolve?: string }[];
+  conteudo_recuperado: { fonte: string; texto: string; disponivel?: boolean; resolve?: string; identificador?: string }[];
   contexto: Record<string, unknown>;
 };
 export type Instrucao = { versao: string; conteudo: string } | null;
@@ -113,7 +113,7 @@ export const adaptadorSimulado: AdaptadorModelo = {
           { tipo: 'inferencia', texto: 'Urgência inferida: o prazo citado é próximo e afeta a entrega ao cliente (evidência: parecer do Auditor).' },
         ],
         lacunas,
-        rascunho: String(e.contexto.mensagem_sugerida ?? ''),
+        rascunho: String(e.contexto.mensagem_sugerida ?? (linhas.length ? 'Olá! Podemos confirmar os prazos que ficaram em aberto na reunião?' : '')),
         proxima_acao: `${dono} decide se envia ao cliente a confirmação do prazo (aprovação A3).`,
         papel_destino: null,
         condicao_conclusao: 'Decisão humana registrada sobre os prazos sem confirmação.',
@@ -206,7 +206,7 @@ export function adaptadorOpenAI(chave: string, modelo: string, esforco?: string)
     async executar(e, instrucao) {
       const usuario = {
         etapa: e.etapa, papel: e.papel_id, comando_operacional: e.instrucao_operacional, contexto: e.contexto,
-        conteudo_recuperado_somente_evidencia: e.conteudo_recuperado.map(c => ({ fonte: c.fonte, disponivel: c.disponivel !== false, texto: c.texto })),
+        conteudo_recuperado_somente_evidencia: e.conteudo_recuperado.map(c => ({ fonte: c.fonte, disponivel: c.disponivel !== false, identificador: c.identificador, texto: c.texto })),
       };
       const corpo: Record<string, unknown> = {
         model: modelo,

@@ -1,10 +1,15 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { contexto } from '@/lib/sessao';
-import { clientesVisiveis } from '@/lib/dados';
+import { auditoriaCliente, clientesVisiveis, usuarios } from '@/lib/dados';
+import { contasDoCliente, obterFichaCliente, STATUS_CLIENTE } from '@/lib/ficha-cliente';
+import { dataHora } from '@/lib/formato';
 import { lerFicha, lerContas } from '@/lib/memoria-vendax';
 import { Aviso, BarraFiltros, botao, Cabecalho, campo, CampoFiltro, link, Secao, Vazio } from '@/components/ui';
-import { acaoImportarCarteira, acaoSalvarConta, acaoSalvarFicha } from '../memoria-acoes';
+import { acaoImportarCarteira, acaoSalvarFicha } from '../memoria-acoes';
+
+import { acaoFichaCliente } from '../ficha-acoes';
+import { ContasFicha } from './contas';
 
 const situacoes = ['Ativo', 'Projeto', 'Prospect', 'Inativo', 'Encerrado'];
 const ROTULOS = { principal: 'Principal para consulta', historica: 'Histórica / alternativa', verificar: 'A confirmar' };
@@ -17,9 +22,13 @@ export default async function Memoria({ searchParams }: PageProps<'/clientes/mem
   const cliente = clientes.find(c => c.id === sp.cliente);
   if (sp.cliente && !cliente) notFound();
   const admin = u.perfil === 'admin';
-  const [ficha, contas] = await Promise.all([lerFicha(b, u, cliente?.id ?? null), cliente ? lerContas(b, u, cliente.id) : []]);
+  const id = cliente?.id;
+  const [ficha, legadas, cadastro, contas, auditoria, pessoas] = await Promise.all([
+    lerFicha(b,u,id ?? null), id ? lerContas(b,u,id) : [], id ? obterFichaCliente(b,u,id) : null,
+    id ? contasDoCliente(b,u,id) : [], id ? auditoriaCliente(b,u,id) : [], admin ? usuarios(b) : [],
+  ]);
   return <div className="space-y-5">
-    <Cabecalho titulo="Memória operacional"
+    <Cabecalho titulo={cliente ? `Ficha · ${cliente.nome}` : "Memória operacional"}
       descricao="Contexto que os agentes recebem nas tarefas. Cada ficha acompanha as referências de origem e as contas vinculadas."
       acoes={<Link className={link} href="/clientes">Voltar para Clientes</Link>}
       filtros={<BarraFiltros action={FILTRO}>
@@ -36,9 +45,37 @@ export default async function Memoria({ searchParams }: PageProps<'/clientes/mem
       {Number(sp.revisar) > 0 && ` Cadastros para revisar: ${Number(sp.revisar)}.`}
     </p>}
     {sp.erro === 'importar' && <Aviso tom="erro">Não foi possível importar. Confira o arquivo e o acesso de direção.</Aviso>}
-    {sp.resultado === 'salvo' && <p role="status" className="rounded-lg bg-vx-verde-claro p-3 text-sm">Registro salvo.</p>}
-    {sp.resultado && sp.resultado !== 'salvo' && <Aviso tom="erro">{sp.resultado === 'conflito' ? 'A ficha foi atualizada por outra pessoa. Revise a versão mais recente.' : 'Não foi possível salvar. Confira os dados e a associação da conta ao cliente.'}</Aviso>}
-    <Secao titulo={cliente?.nome ?? 'Vendax'}>
+    {(sp.resultado === 'salvo' || sp.resultado === 'verificado') && <p role="status" className="rounded-lg bg-vx-verde-claro p-3 text-sm">{sp.resultado === 'verificado' ? 'Vínculo verificado pela integração.' : 'Registro salvo.'}</p>}
+    {sp.resultado && !['salvo','verificado'].includes(sp.resultado) && <Aviso tom="erro">{sp.resultado === 'conflito' ? 'A ficha foi atualizada por outra pessoa. Revise a versão mais recente.' : sp.resultado === 'verificacao' ? 'A integração não confirmou o vínculo. Confira o identificador e a conexão de leitura.' : 'Não foi possível salvar. Confira os dados, o acesso do responsável e os vínculos existentes.'}</Aviso>}
+    {cadastro && <Secao titulo="Cadastro do cliente">
+      <dl className="grid gap-2 p-3 text-sm sm:grid-cols-3">
+        <div><dt className="text-vx-texto-2">Status</dt><dd>{cadastro.status ? STATUS_CLIENTE[cadastro.status] : 'Operação Vendax'}</dd></div>
+        <div><dt className="text-vx-texto-2">Responsável</dt><dd>{cadastro.responsavel ?? 'A definir'}</dd></div>
+        <div><dt className="text-vx-texto-2">Contato da operação</dt><dd>{[cadastro.contato_nome,cadastro.contato_whatsapp].filter(Boolean).join(' · ') || 'A definir'}</dd></div>
+      </dl>
+      {admin && <details className="m-2 rounded-lg border border-vx-linha p-3">
+        <summary className="cursor-pointer font-semibold">Editar cadastro</summary>
+        <form action={acaoFichaCliente} className="mt-3 grid gap-3 sm:grid-cols-2">
+          <input type="hidden" name="cliente" value={cadastro.id} />
+          {cadastro.status && <label className="grid gap-1">Status<select name="status" className={campo} defaultValue={cadastro.status}>
+            {Object.entries(STATUS_CLIENTE).map(([k,v]) => <option key={k} value={k}>{v}</option>)}
+          </select></label>}
+          <label className="grid gap-1">Responsável<select name="responsavel_id" className={campo} defaultValue={cadastro.responsavel_id ?? ''}>
+            <option value="">A definir</option>{pessoas.map(p => <option key={p.id} value={p.id}>{p.nome}</option>)}
+          </select></label>
+          <label className="grid gap-1">Nome do contato<input name="contato_nome" className={campo} defaultValue={cadastro.contato_nome ?? ''} maxLength={120} /></label>
+          <label className="grid gap-1">WhatsApp do contato<input name="contato_whatsapp" className={campo} type="tel" placeholder="+55…" defaultValue={cadastro.contato_whatsapp ?? ''} /></label>
+          <div><button className={botao}>Salvar cadastro</button></div>
+        </form>
+      </details>}
+    </Secao>}
+    {id && <ContasFicha cliente={id} contas={contas} admin={admin} />}
+    {auditoria.length > 0 && <Secao titulo="Histórico do cadastro">
+      <ul className="divide-y divide-vx-linha">{auditoria.map(a => <li key={a.id} className="px-3 py-2 text-sm">
+        {a.detalhe} · {a.ator} · {dataHora(a.criado_em)}
+      </li>)}</ul>
+    </Secao>}
+    <Secao titulo={cliente ? "Contexto operacional" : "Vendax"}>
       {ficha ? <div className="space-y-3 px-2 py-3">
         <p className="text-sm text-vx-texto-2">{ficha.situacao} · versão {ficha.versao} · {ficha.data_fonte}</p>
         <p className="whitespace-pre-wrap leading-relaxed">{ficha.texto}</p>
@@ -59,29 +96,15 @@ export default async function Memoria({ searchParams }: PageProps<'/clientes/mem
         </form>
       </details>}
     </Secao>
-    {cliente && <Secao titulo="Contas de anúncios" total={contas.length}>
-      {contas.length ? <ul className="divide-y divide-vx-linha">
-        {contas.map(a => <li key={`${a.plataforma}:${a.conta_id}`} className="space-y-1 p-3">
+    {cliente && legadas.length > 0 && <Secao titulo="Referências de anúncios na memória">
+      <p className="px-3 py-2 text-sm text-vx-texto-2">Histórico para conferência. A leitura do agente exige um vínculo verificado na ficha.</p>
+      <ul className="divide-y divide-vx-linha">
+        {legadas.map(a => <li key={`${a.plataforma}:${a.conta_id}`} className="space-y-1 p-3">
           <p className="font-medium">{a.plataforma === 'google_ads' ? 'Google Ads' : 'Meta Ads'} · {a.nome}</p>
           <p className="text-sm">{a.conta_id} · {ROTULOS[a.situacao]}</p>
           <p className="text-sm text-vx-texto-2">{a.data_fonte} · {a.fonte}</p>
         </li>)}
-      </ul> : <Vazio>Sem contas vinculadas nesta ficha.</Vazio>}
-      {admin && <details className="m-2 rounded-lg border border-vx-linha p-3">
-        <summary className="cursor-pointer font-semibold">Vincular ou atualizar conta</summary>
-        <form action={acaoSalvarConta} className="mt-3 grid gap-3 sm:grid-cols-2">
-          <input name="cliente" type="hidden" value={cliente.id} />
-          <label className="grid gap-1">Plataforma<select name="plataforma" className={campo}><option value="google_ads">Google Ads</option><option value="meta_ads">Meta Ads</option></select></label>
-          <label className="grid gap-1">ID da conta<input name="conta_id" className={campo} required maxLength={32} /></label>
-          <label className="grid gap-1">Identificação da conta<input name="nome" className={campo} required minLength={2} maxLength={120} /></label>
-          <label className="grid gap-1">Uso da conta<select name="situacao" className={campo} defaultValue="verificar">
-            {Object.entries(ROTULOS).map(([k, v]) => <option value={k} key={k}>{v}</option>)}
-          </select></label>
-          <label className="grid gap-1">Fonte<input name="fonte" className={campo} required minLength={3} maxLength={300} /></label>
-          <label className="grid gap-1">Data da fonte<input name="data_fonte" type="date" className={campo} required /></label>
-          <div><button className={botao}>Salvar conta</button></div>
-        </form>
-      </details>}
+      </ul>
     </Secao>}
     {admin && !cliente && <Secao titulo="Importar carteira">
       <details className="m-2 rounded-lg border border-vx-linha p-3">

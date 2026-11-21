@@ -7,6 +7,7 @@ import { useEffect, useLayoutEffect, useRef, useState, startTransition, type For
 import { acaoEnviarMensagemChat } from '@/app/acoes';
 import type { AtividadeAgente, EscritorioAoVivo, EstadoDaFila, MensagemChat } from '@/lib/escritorio-ao-vivo';
 import type { FluxoClaude } from '@/lib/skills-claude';
+import type { StatusCliente } from '@/lib/ficha-cliente';
 import { ChatDiretor } from './chat-diretor';
 import { ChatEspecialistas } from './chat-especialistas';
 import { Icone } from './nav';
@@ -19,7 +20,7 @@ type Props = {
   inicial: EscritorioAoVivo; usuario: string; equipe: Pessoa[]; agentes: AgenteVivo[]; salas: SalaVivo[];
   filtros: ReactNode; zonas: ReactNode; lista: ReactNode; detalhes: ReactNode; legenda: ReactNode;
   mostraPredio: boolean; mostraLista: boolean;
-  especialistas: FluxoClaude[]; clientes: Pessoa[];
+  especialistas: FluxoClaude[]; clientes: (Pessoa & { status: StatusCliente | null })[];
 };
 
 const hora = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });

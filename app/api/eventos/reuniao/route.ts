@@ -4,7 +4,7 @@ import { banco } from '@/lib/db';
 import { carregarUsuario } from '@/lib/escopo';
 import { processarFila, receberEventoReuniao } from '@/lib/orquestracao';
 
-// Ponto de entrada para eventos de reunião (ex.: n8n + Google Workspace), desligado até a integração ser aprovada.
+// Entrada autenticada para eventos de reunião, habilitada por configuração do servidor.
 // Exige VX_EVENTOS_TOKEN no servidor e o cabeçalho Authorization: Bearer <token>.
 const Evento = z.object({
   id: z.string().min(3).max(200), cliente_id: z.string(), titulo: z.string().min(3), dono_id: z.string(),

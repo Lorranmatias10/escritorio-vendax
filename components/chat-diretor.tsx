@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { acaoEnviarAoDiretor } from '@/app/acoes';
 import type { AutonomiaDiretor, TurnoDiretor } from '@/lib/diretor';
+import { STATUS_CLIENTE, type StatusCliente } from '@/lib/ficha-cliente';
 import { ROTULO_ESTADO_TAREFA } from '@/lib/catalogo';
 import { Icone } from './nav';
 
@@ -16,10 +17,11 @@ const autonomia = {
 const horario = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 type Props = {
   visivel: boolean; conectado: boolean; turnos: TurnoDiretor[];
-  clientes: { id: string; nome: string }[]; cliente: string; mudarCliente: (id: string) => void;
+  clientes: { id: string; nome: string; status: StatusCliente | null }[]; cliente: string; mudarCliente: (id: string) => void;
 };
 
 export function ChatDiretor({ visivel, conectado, turnos, clientes, cliente, mudarCliente }: Props) {
+  const [mostrarInativos, setMostrarInativos] = useState(false);
   const [texto, setTexto] = useState('');
   const [modo, setModo] = useState<AutonomiaDiretor>('delegar');
   const [erro, setErro] = useState('');
@@ -68,9 +70,15 @@ export function ChatDiretor({ visivel, conectado, turnos, clientes, cliente, mud
       <label className="vx-chat-canal">Cliente ou operação
         <select value={cliente} disabled={!!envio} onChange={e => { setErro(''); acompanhar.current = true; mudarCliente(e.target.value); }}>
           <option value="">Operação interna da Vendax</option>
-          {clientes.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
+          {([[null,'Produtos próprios'], ...Object.entries(STATUS_CLIENTE)] as [StatusCliente | null,string][]).map(([status,label]) => {
+            const grupo = clientes.filter(c => c.status === status && (status !== 'inativo' || mostrarInativos || c.id === cliente));
+            return grupo.length > 0 && <optgroup key={status ?? 'vendax'} label={label}>{grupo.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}</optgroup>;
+          })}
         </select>
       </label>
+      {clientes.some(c => c.status === 'inativo') && <label className="flex items-center gap-2 text-xs">
+        <input type="checkbox" checked={mostrarInativos} onChange={e => setMostrarInativos(e.target.checked)} /> Mostrar inativos
+      </label>}
     </div>
     <div className="vx-chat-log" ref={log} role="log" aria-label="Conversa com o Diretor Geral" onScroll={e => {
       const n = e.currentTarget;

@@ -62,3 +62,12 @@ export async function simularFalha(b: Banco, u: Usuario) {
   await processarFila(b);
   return id;
 }
+
+export const dadosReuniaoDemo = {
+  fonteAusente: { fonte: 'Relatório de performance (Reportei)', texto: '', disponivel: false, resolve: 'Lorran (integrações)' },
+  mensagem: 'Olá! Confirmando o combinado na reunião: a landing page de implantes fica pronta até sexta-feira. Podemos considerar esse prazo?',
+  intencao: 'Enviar ao cliente a confirmação do prazo da landing page',
+  destinatario: 'Contato fictício da Clínica Aurora',
+  alvo: 'WhatsApp · contato fictício da Clínica Aurora',
+  conta: 'WhatsApp oficial Vendax (Demonstração)',
+};

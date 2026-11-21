@@ -7,6 +7,7 @@ const I = {
   hoje: <path d="M8 3v3m8-3v3M4 9h16M5 6h14a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Zm4 8 2 2 4-4" />,
   escritorio: <path d="M4 21V5a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v16M16 9h3a1 1 0 0 1 1 1v11M3 21h18M8 8h4M8 12h4M8 16h4" />,
   clientes: <path d="M16 19v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1M9.5 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM21 19v-1a4 4 0 0 0-3-3.9M16 4.1a3 3 0 0 1 0 5.8" />,
+  rotinas: <path d="M12 7v5l3 2m6-2a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM5 4 3 6m16-2 2 2" />,
   aprovacoes: <path d="M12 3 4 6v6c0 4.4 3.4 8.3 8 9 4.6-.7 8-4.6 8-9V6l-8-3Zm-3 9 2 2 4-4" />,
   agentes: <path d="M12 3v3m-5 3h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2Zm2 5h.01M15 14h.01M2 13v2m20-2v2" />,
   integracoes: <path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0V7Zm5 9v5" />,
@@ -24,7 +25,7 @@ const I = {
 const ITENS = [
   ['/hoje', 'Hoje', 'hoje', 'hoje'], ['/escritorio', 'Escritório', null, 'escritorio'], ['/clientes', 'Clientes', null, 'clientes'],
   ['/aprovacoes', 'Aprovações', 'aprovacoes', 'aprovacoes'], ['/agentes', 'Agentes', null, 'agentes'], ['/integracoes', 'Integrações', 'integracoes', 'integracoes'],
-  ['/usuarios', 'Usuários', null, 'usuarios'],
+  ['/rotinas', 'Rotinas', null, 'rotinas'], ['/usuarios', 'Usuários', null, 'usuarios'],
 ] as const;
 
 export function Icone({ nome, className = 'h-[18px] w-[18px]' }: { nome: keyof typeof I; className?: string }) {
@@ -36,7 +37,7 @@ export function Nav({ contadores, admin }: { contadores: { hoje: number; aprovac
   return (
     <nav aria-label="Principal" className="min-w-0">
       <ul className="-mx-1 flex gap-1 overflow-x-auto px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:mx-0 lg:flex-col lg:px-0 lg:overflow-visible lg:pb-0">
-        {ITENS.filter(([href]) => admin || href !== '/usuarios').map(([href, nome, k, ic]) => {
+        {ITENS.filter(([href]) => admin || (href !== '/usuarios' && href !== '/rotinas')).map(([href, nome, k, ic]) => {
           const ativo = p.startsWith(href);
           const n = k ? contadores[k] : 0;
           return (

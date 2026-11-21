@@ -5,8 +5,8 @@ import { testarIntegracao, testarTodas, ultimosTestes, historicoTestes } from '@
 import { cifrar, decifrar, guardarSegredo } from '@/lib/cofre';
 
 let b: Banco;
-const ENV = ['META_ACCESS_TOKEN', 'ASAAS_API_KEY', 'NEXTTAGS_TOKEN', 'NEXTTAGS_BASE_URL', 'NEXTTAGS_HEALTH_PATH', 'N8N_API_KEY', 'N8N_BASE_URL',
-  'GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'REPORTEI_TOKEN'];
+const ENV = ['META_ACCESS_TOKEN', 'ASAAS_API_KEY', 'NEXTTAGS_TOKEN', 'NEXTTAGS_BASE_URL', 'NEXTTAGS_HEALTH_PATH',
+  'GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_ADS_DEVELOPER_TOKEN', 'REPORTEI_TOKEN', 'REPORTEI_BASE_URL', 'CRM_VENDAX_TOKEN', 'VENDAX_APP_TOKEN', 'VENDAX_APP_HEALTH_PATH'];
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 beforeAll(async () => {
@@ -27,10 +27,10 @@ describe('health checks', () => {
   it('sem credencial: "Não configurado" em todas, sem chamar rede, e registra histórico', async () => {
     const f = vi.fn(); vi.stubGlobal('fetch', f);
     const rs = await testarTodas(b, 'manual', 'tiago');
-    expect(rs).toHaveLength(11); // 10 integrações + provedor de IA
+    expect(rs).toHaveLength(9); // 8 integrações + provedor de IA
     expect(rs.every(r => r.status === 'nao_configurado')).toBe(true);
     expect(f).not.toHaveBeenCalled();
-    expect((await ultimosTestes(b))).toHaveLength(11);
+    expect((await ultimosTestes(b))).toHaveLength(9);
   });
 
   it('Meta sem ads_read: "Parcial" com ação; token nunca aparece no resultado', async () => {
@@ -73,17 +73,82 @@ describe('health checks', () => {
     expect((init.headers as Record<string, string>).access_token).toBe('$aact_chave_teste_123');
   });
 
-  it('API sem endpoint documentado (NextTags): token sem URL = "Não testado", nunca "Conectado"', async () => {
+  it.each([true, false])('CRM valida a identidade e o escopo de leitura (%s)', async readOnly => {
+    process.env.CRM_VENDAX_TOKEN = 'tok-crm';
+    vi.stubGlobal('fetch', vi.fn(async (url: string, request?: RequestInit) => {
+      expect(url).toBe('https://uktnpcuobzpokgmdiplw.supabase.co/functions/v1/mcp-server');
+      expect(request?.method).toBe('POST');
+      expect(new Headers(request?.headers).get('Authorization')).toBe('Bearer tok-crm');
+      expect(JSON.parse(String(request?.body)).params).toEqual({ name: 'whoami', arguments: {} });
+      return json(200, { jsonrpc: '2.0', id: 1, result: { structuredContent: {
+        auth_mode: 'personal_token', read_only: readOnly, spaces: [{ id: 1 }], display_name: 'Usuário de teste',
+      } } });
+    }));
+    const r = await testarIntegracao(b, 'crm', 'manual', 'tiago');
+    expect(r.status).toBe(readOnly ? 'conectado' : 'parcial');
+    expect(JSON.stringify(r)).not.toContain('Usuário de teste');
+  });
+
+  it('Vendax App consulta um contato e descarta seus dados', async () => {
+    process.env.VENDAX_APP_TOKEN = 'tok-vendax-app';
+    vi.stubGlobal('fetch', vi.fn(async (url: string, request?: RequestInit) => {
+      expect(url).toBe('https://vendaxapp.tech/api/v1/contacts?limit=1');
+      expect(request?.method).toBe('GET');
+      expect(new Headers(request?.headers).get('Authorization')).toBe('Bearer tok-vendax-app');
+      return json(200, { contacts: [{ name: 'Contato de teste' }] });
+    }));
+    const r = await testarIntegracao(b, 'vendax-app', 'manual', 'tiago');
+    expect(r.status).toBe('conectado');
+    expect(JSON.stringify(r)).not.toContain('Contato de teste');
+  });
+
+  it.each([true, false])('Vendax App só conecta quando a rota dedicada confirma disponibilidade (%s)', async ok => {
+    process.env.VENDAX_APP_TOKEN = 'tok-vendax-status';
+    process.env.VENDAX_APP_HEALTH_PATH = '/api/v1/escritorio/status';
+    vi.stubGlobal('fetch', vi.fn(async (url: string, request?: RequestInit) => {
+      expect(url).toBe('https://vendaxapp.tech/api/v1/escritorio/status');
+      expect(request?.method).toBe('GET');
+      expect(new Headers(request?.headers).get('Authorization')).toBe('Bearer tok-vendax-status');
+      return json(200, { ok });
+    }));
+    const r = await testarIntegracao(b, 'vendax-app', 'manual', 'tiago');
+    expect(r.status).toBe(ok ? 'conectado' : 'erro');
+    if (ok) expect(r.escopo).toBe('consulta de disponibilidade do serviço');
+  });
+
+  it('NextTags consulta a conta com o cabeçalho oficial', async () => {
     process.env.NEXTTAGS_TOKEN = 'tok-nexttags';
-    vi.stubGlobal('fetch', vi.fn());
+    const fetchAccount = vi.fn(async (url: string, request?: RequestInit) => {
+      expect(url).toBe('https://app.nextagsai.com.br/api/accounts/me');
+      expect(request?.method).toBe('GET');
+      expect(new Headers(request?.headers).get('X-ACCESS-TOKEN')).toBe('tok-nexttags');
+      return json(200, { page_id: 1, name: 'Conta de teste' });
+    });
+    vi.stubGlobal('fetch', fetchAccount);
     const r = await testarIntegracao(b, 'nexttags', 'manual', 'tiago');
-    expect(r.status).toBe('nao_testado');
+    expect([r.status, r.conta]).toEqual(['conectado', 'Conta de teste']);
+  });
+
+  it.each([
+    { base: undefined, endpoint: 'https://app.reportei.com/api/v2/companies/settings', data: { company: { name: 'Vendax' } } },
+    { base: 'https://connect.reportei.com/api/', endpoint: 'https://connect.reportei.com/api/merchants/settings', data: { merchant: { name: 'Vendax' } } },
+  ])('Reportei testa a API correspondente a $endpoint', async ({ base, endpoint, data }) => {
+    process.env.REPORTEI_TOKEN = 'tok-reportei';
+    if (base) process.env.REPORTEI_BASE_URL = base;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, request?: RequestInit) => {
+      expect(url).toBe(endpoint);
+      expect(request?.method).toBe('GET');
+      expect(new Headers(request?.headers).get('Authorization')).toBe('Bearer tok-reportei');
+      return json(200, data);
+    }));
+    const r = await testarIntegracao(b, 'reportei', 'manual', 'tiago');
+    expect([r.status, r.conta]).toEqual(['conectado', 'Vendax']);
   });
 
   it('sem rede: "Não testado" com o motivo', async () => {
-    process.env.N8N_API_KEY = 'n8n-key'; process.env.N8N_BASE_URL = 'https://n8n.exemplo.com';
+    process.env.ASAAS_API_KEY = 'asaas-chave-teste';
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed'); }));
-    const r = await testarIntegracao(b, 'n8n', 'manual', 'tiago');
+    const r = await testarIntegracao(b, 'asaas', 'manual', 'tiago');
     expect(r.status).toBe('nao_testado');
     expect(r.mensagem).toMatch(/não conseguiu alcançar/);
   });
@@ -109,5 +174,24 @@ describe('health checks', () => {
     const r = await testarIntegracao(b, 'google-workspace', 'manual', 'tiago');
     expect([r.status, r.conta]).toEqual(['parcial', 'ops@vendax.example']);
     expect(r.mensagem).toMatch(/drive.readonly/);
+  });
+
+  it.each([undefined, 'token-legado'])('Google Ads lista contas com token legado opcional (%s)', async token => {
+    process.env.GOOGLE_OAUTH_CLIENT_ID = 'cid';
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET = 'csecret';
+    if (token) process.env.GOOGLE_ADS_DEVELOPER_TOKEN = token;
+    await guardarSegredo(b, 'google-ads:refresh_token', 'refresh-ads');
+    const f = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes('oauth2.googleapis.com/token')) return json(200, { access_token: 'access-ads', scope: 'https://www.googleapis.com/auth/adwords' });
+      if (url.includes('userinfo')) return json(200, { email: 'ops@vendax.example' });
+      expect(init?.method).toBe('GET');
+      expect(new Headers(init?.headers).get('developer-token')).toBe(token ?? null);
+      return json(200, { resourceNames: ['customers/123'] });
+    });
+    vi.stubGlobal('fetch', f);
+
+    const r = await testarIntegracao(b, 'google-ads', 'manual', 'tiago');
+
+    expect(r.status).toBe('conectado');
   });
 });

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Banco, Q } from './db';
 import { podeVer, SemAcesso, type Usuario } from './escopo';
+import { contasDoCliente, obterFichaCliente, STATUS_CLIENTE } from './ficha-cliente';
 import type { EntradaAgente } from './ia';
 
 export const plataformasAds = z.enum(['google_ads', 'meta_ads']);
@@ -100,40 +101,27 @@ export async function salvarFicha(q: Q, u: Usuario, cliente: string | null, entr
   return alteradas.length === 1;
 }
 
-export async function salvarConta(b: Banco, u: Usuario, cliente: string, entrada: unknown) {
-  if (u.perfil !== 'admin') throw new SemAcesso();
-  const a = conta.parse(entrada);
-  return b.transacao(async q => {
-    const [c] = await q.query('select id from clientes where id=$1 and not demo for update', [cliente]);
-    if (!c) throw new SemAcesso();
-    if (a.situacao === 'principal') await q.query(`update contas_anuncio set situacao='historica'
-      where cliente_id=$1 and plataforma=$2 and conta_id<>$3 and situacao='principal'`, [cliente, a.plataforma, a.conta_id]);
-    const resultado = await q.query(`insert into contas_anuncio (plataforma,conta_id,cliente_id,nome,situacao,fonte,data_fonte) values ($1,$2,$3,$4,$5,$6,$7)
-      on conflict (plataforma,conta_id) do update set nome=excluded.nome, situacao=excluded.situacao, fonte=excluded.fonte,
-      data_fonte=excluded.data_fonte where contas_anuncio.cliente_id=excluded.cliente_id returning conta_id`,
-    [a.plataforma, a.conta_id, cliente, a.nome, a.situacao, a.fonte, a.data_fonte]);
-    if (!resultado.length) throw new Error('A conta já pertence a outro cliente.');
-  });
-}
-
 export async function fontesDaMemoria(q: Q, u: Usuario, cliente: string | null, area: string | null, tarefaId: string) {
   const fontes: EntradaAgente['conteudo_recuperado'] = [];
   if (!podeVer(u, cliente, area)) return fontes;
   const fichas = await Promise.all([lerFicha(q, u, null), cliente ? lerFicha(q, u, cliente) : null]);
   for (const [i, f] of fichas.entries()) if (f) fontes.push({
     fonte: `${i ? 'Ficha do cliente' : 'Memória operacional da Vendax'} · v${f.versao} · ${f.data_fonte}`,
-    texto: `Situação registrada: ${f.situacao}\nOrigem: ${f.fonte}\n${f.texto}`,
+    texto: `Situação na memória: ${f.situacao}\nOrigem: ${f.fonte}\n${f.texto}`,
   });
   if (!cliente) return fontes;
-  const [contas, tarefas] = await Promise.all([
-    lerContas(q, u, cliente),
+  const [cadastro, contas, tarefas] = await Promise.all([
+    obterFichaCliente(q,u,cliente), contasDoCliente(q,u,cliente),
     q.query<{ objetivo: string; estado: string; atualizado_em: string }>(
       `select left(objetivo,240) as objetivo,estado,atualizado_em::date::text as atualizado_em from tarefas
        where cliente_id=$1 and not demo and id<>$2 and fonte not in ('Chat com especialista', 'Chat com Diretor Geral') order by atualizado_em desc limit 8`, [cliente, tarefaId]),
   ]);
-  if (contas.length) fontes.push({
-    fonte: 'Contas de anúncios cadastradas para este cliente',
-    texto: contas.map(c => `${c.plataforma} ${c.conta_id} (${c.nome}) · ${c.situacao} · ${c.data_fonte} · ${c.fonte}`).join('\n'),
+  if (cadastro) fontes.push({ fonte: 'Cadastro do cliente',
+    texto: `${cadastro.nome} · ${cadastro.status ? STATUS_CLIENTE[cadastro.status] : 'Operação Vendax'} · Responsável: ${cadastro.responsavel ?? 'a definir'}` });
+  const verificadas = contas.filter(c => c.verificado_em && c.verificado_por);
+  if (verificadas.length) fontes.push({
+    fonte: 'Vínculos verificados na ficha do cliente',
+    texto: verificadas.map(c => `${c.integracao} ${c.identificador} (${c.rotulo}) · Verificado em ${c.verificado_em}`).join('\n'),
   });
   if (tarefas.length) fontes.push({
     fonte: 'Tarefas recentes do cliente no Escritório',

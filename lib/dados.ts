@@ -2,6 +2,8 @@
 // inclusive contadores e resumos.
 import type { Q } from './db';
 import { filtroSql, podeVer, type Usuario } from './escopo';
+import type { StatusCliente } from './ficha-cliente';
+import type { Rotina } from './agenda-rotinas';
 import type { EstadoTarefa } from './catalogo';
 import { atividadeAgentes } from './escritorio-ao-vivo';
 
@@ -130,7 +132,8 @@ export async function obterPapel(q: Q, u: Usuario, id: string) {
 // ---------- Clientes, entregas, incidentes ----------
 export async function clientesVisiveis(q: Q, u: Usuario) {
   const params: unknown[] = [];
-  return q.query<{ id: string; nome: string; demo: boolean }>(`select id, nome, demo from clientes c where ${filtroSql(u, params, 'c.id', null)} order by nome`, params);
+  return q.query<{ id: string; nome: string; demo: boolean; status: StatusCliente | null; responsavel: string | null }>(
+    `select c.id,c.nome,c.demo,c.status,u.nome as responsavel from clientes c left join usuarios u on u.id=c.responsavel_id where ${filtroSql(u, params, 'c.id', null)} order by c.nome`, params);
 }
 
 export async function listarEntregas(q: Q, u: Usuario, f: { cliente?: string; de?: string; ate?: string } = {}) {
@@ -139,8 +142,8 @@ export async function listarEntregas(q: Q, u: Usuario, f: { cliente?: string; de
   if (f.cliente) { params.push(f.cliente); where.push(`e.cliente_id = $${params.length}`); }
   if (f.de) { params.push(f.de); where.push(`e.prazo >= ($${params.length}::date)::timestamp at time zone 'America/Sao_Paulo'`); }
   if (f.ate) { params.push(f.ate); where.push(`e.prazo < (($${params.length}::date) + 1)::timestamp at time zone 'America/Sao_Paulo'`); }
-  return q.query<{ id: number; titulo: string; prazo: string | null; estado: string; cliente_nome: string; tarefa_id: string | null; demo: boolean }>(
-    `select e.id, e.titulo, e.prazo, e.estado, c.nome as cliente_nome, e.tarefa_id, e.demo from entregas e join clientes c on c.id = e.cliente_id
+  return q.query<{ id: number; titulo: string; prazo: string | null; estado: string; cliente_id: string; cliente_nome: string; tarefa_id: string | null; demo: boolean }>(
+    `select e.id, e.titulo, e.prazo, e.estado, e.cliente_id, c.nome as cliente_nome, e.tarefa_id, e.demo from entregas e join clientes c on c.id = e.cliente_id
      where ${where.join(' and ')} order by e.prazo nulls last`, params);
 }
 
@@ -149,8 +152,8 @@ export async function listarIncidentes(q: Q, u: Usuario, f: { cliente?: string; 
   const where = [filtroSql(u, params, 'i.cliente_id', 'i.area_interna')];
   if (f.cliente) { params.push(f.cliente); where.push(`i.cliente_id = $${params.length}`); }
   if (f.abertos) where.push(`i.estado <> 'resolvido'`);
-  return q.query<{ id: number; titulo: string; severidade: string; estado: string; cliente_nome: string | null; area_interna: string | null; tarefa_id: string | null; demo: boolean; criado_em: string }>(
-    `select i.id, i.titulo, i.severidade, i.estado, c.nome as cliente_nome, i.area_interna, i.tarefa_id, i.demo, i.criado_em
+  return q.query<{ id: number; titulo: string; severidade: string; estado: string; cliente_id: string | null; cliente_nome: string | null; area_interna: string | null; tarefa_id: string | null; demo: boolean; criado_em: string }>(
+    `select i.id, i.titulo, i.severidade, i.estado, i.cliente_id, c.nome as cliente_nome, i.area_interna, i.tarefa_id, i.demo, i.criado_em
      from incidentes i left join clientes c on c.id = i.cliente_id where ${where.join(' and ')} order by i.criado_em desc`, params);
 }
 
@@ -207,4 +210,28 @@ export async function ultimaHomologacao(q: Q, papel?: string, tipo: 'padrao' | '
     `select h.caso, h.esperado, h.passou, h.evidencia, h.versao, h.rodada, h.executado_em, u.nome as executado_por
      from homologacoes h join usuarios u on u.id = h.executado_por where h.rodada = $1 and ($2::text is null or $2 = any(h.papeis)) order by h.id`, [ult.rodada, papel ?? null]);
   return { rodada: ult.rodada, versao: casos[0].versao, executado_em: casos[0].executado_em, executado_por: casos[0].executado_por, aprovado: casos.every(c => c.passou), casos };
+}
+
+
+export async function auditoriaCliente(q: Q, u: Usuario, cliente: string) {
+  if (u.perfil !== 'admin' || !podeVer(u,cliente,null)) return [];
+  return q.query<{ id: number; acao: string; detalhe: string; ator: string; criado_em: string }>(
+    `select a.id,a.acao,a.detalhe,u.nome as ator,a.criado_em from clientes_auditoria a
+     join usuarios u on u.id=a.ator_id where a.cliente_id=$1 order by a.id desc limit 30`,[cliente]);
+}
+
+export async function listarRotinas(q: Q, u: Usuario) {
+  if (u.perfil !== 'admin') return [];
+  return q.query<Rotina & { papel: string; cliente: string | null; area: string | null; dono: string; aprovador: string }>(
+    `select r.*,p.nome as papel,c.nome as cliente,d.nome as area,x.nome as dono,y.nome as aprovador from rotinas r
+     join papeis p on p.id=r.papel_id left join clientes c on c.id=r.cliente_id
+     left join departamentos d on d.id=r.area_interna join usuarios x on x.id=r.dono_id join usuarios y on y.id=r.aprovador_id
+     order by r.ativa desc,r.proxima_execucao nulls last,r.nome,r.id`);
+}
+
+export async function historicoRotina(q: Q, u: Usuario, id: string) {
+  if (u.perfil !== 'admin') return [];
+  return q.query<{id: number; janela: string; origem: 'agenda'|'manual'; estado: 'ignorada'|'disparada';
+    motivo: string; tarefa_id: string|null; criado_em: string}>(
+    'select * from rotinas_execucoes where rotina_id=$1 order by id desc limit 40',[id]);
 }

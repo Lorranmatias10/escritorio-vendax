@@ -14,8 +14,8 @@ export default async function Aprovacoes() {
   const historico = todas.filter(a => a.estado !== 'pendente');
   return (
     <div className="space-y-5">
-      <Cabecalho titulo="Aprovações e histórico" descricao="Ação supervisionada (A3). Cada aprovação fica presa aos parâmetros exatos, ao prazo, à conta e ao aprovador." />
-      <Aviso tom="alerta" titulo="Ações externas desabilitadas na V1.">Aprovar registra a decisão e a evidência de ação solicitada; nada é enviado, publicado ou alterado fora do escritório.</Aviso>
+      <Cabecalho titulo="Aprovações e histórico" descricao="Revisões internas e decisões supervisionadas, com prazo, aprovador e histórico." />
+      <Aviso tom="alerta" titulo="Ações externas desabilitadas na V1.">Aprovar registra a decisão no Escritório. Ações de envio ou publicação ficam desabilitadas.</Aviso>
       <section aria-labelledby="pend">
         <h2 id="pend" className="mb-2 flex items-center gap-2 text-[15px] font-semibold">Pendentes <Contador n={pendentes.length} /></h2>
         {pendentes.length ? <div className="space-y-3">{pendentes.map(a => <Cartao key={a.id} a={a} podeDecidir={u.id === a.aprovador_id || u.perfil === 'admin'} />)}</div>
@@ -53,7 +53,7 @@ function Cartao({ a, podeDecidir }: { a: Awaited<ReturnType<typeof listarAprovac
             <form action={acaoDecidir} className="flex flex-wrap items-end gap-2">
               <input type="hidden" name="aprovacao" value={a.id} />
               <label className="flex min-w-56 flex-1 flex-col gap-1 text-xs font-medium text-vx-texto-2">Nota da decisão (opcional)<input name="nota" maxLength={500} className={campo} /></label>
-              <button name="decisao" value="aprovada" className={botao}>Aprovar (simulado)</button>
+              <button name="decisao" value="aprovada" className={botao}>{a.modo === 'A1' || a.alvo === 'Revisão interna' ? 'Aprovar rascunho' : 'Aprovar (simulado)'}</button>
               <button name="decisao" value="rejeitada" className={botaoSec}>Rejeitar</button>
             </form>
           ) : <p className="text-vx-texto-2">Somente {a.aprovador_nome} ou a direção pode decidir.</p>
