@@ -5,7 +5,7 @@ import { carregarUsuario, podeVer, SemAcesso, type Usuario } from './escopo';
 import { SaidaAgente, adaptadorConfigurado, adaptadorDoPapel, claudeHomologado, type AdaptadorModelo, type EntradaAgente } from './ia';
 import { fluxoDoPapel, type FluxoClaude } from './skills-claude';
 import { consultaAds } from './consulta-ads';
-import { confirmarIdentidadeConta, consultarFontes, pendenciasFontes, planoFontes } from './fontes-cliente';
+import { confirmarFontesInternas, confirmarIdentidadeConta, consultarFontes, pendenciasFontes, planoFontes } from './fontes-cliente';
 import { contasDoCliente, dadosContaCliente, dadosFichaCliente, fonteCliente,
   obterFichaCliente, operacoesVendax, type FonteCliente } from './ficha-cliente';
 import { formularioRotina, horarioRotina, janelaRotina, periodoRotina, type Rotina } from './agenda-rotinas';
@@ -921,6 +921,11 @@ async function dispararRotina(b: Banco, q: Q, r: Rotina, janela: string, origem:
   const [usados] = await q.query<{ n: number }>(`select count(*)::int n from rotinas_execucoes
     where estado='disparada' and criado_em > $1::timestamptz - interval '1 hour'`,[agora.toISOString()]);
   if (usados.n >= limiteDisparos()) return log('Limite geral de disparos na última hora atingido.');
+  try {
+    await confirmarFontesInternas(q,plano);
+  } catch {
+    return log('O CRM Vendax não confirmou o espaço comercial de leitura - quem resolve: direção');
+  }
   const { tarefaId } = await receberPedido(b,dono,{
     id: `rotina:${r.id}:${janela}`, papel_id: r.papel_id, cliente_id: r.cliente_id, area_interna: r.area_interna,
     dono_id: r.dono_id, aprovador_id: r.aprovador_id, objetivo: r.objetivo, fontes_integracoes: r.fontes,

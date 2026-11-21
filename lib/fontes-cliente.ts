@@ -159,6 +159,12 @@ export async function planoFontes(q: Q, u: Usuario, cliente: string | null, area
   });
 }
 
+export async function confirmarFontesInternas(q: Q, plano: Awaited<ReturnType<typeof planoFontes>>) {
+  for (const p of plano) {
+    if (p.interno) await lerCrm(q,'espaco_crm',p.interno,true);
+  }
+}
+
 export function pendenciasFontes(plano: Awaited<ReturnType<typeof planoFontes>>, cliente: string | null) {
   return plano.filter(p => !p.contas.length && !p.interno).map(p => ({
     fonte: FONTES_CLIENTE[p.fonte].nome,
