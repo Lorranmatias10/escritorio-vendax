@@ -1,4 +1,4 @@
-// Health checks reais das 10 integrações. Todos são chamadas SOMENTE LEITURA (GET, ou a troca de refresh token do OAuth).
+// Health checks de leitura (inclui renovação OAuth e consultas MCP).
 // O resultado nunca carrega segredo: só status, conta, escopo e mensagem. O status nunca é fixo nem manual.
 import type { Banco, Q } from './db';
 import { lerSegredo } from './cofre';
@@ -58,7 +58,7 @@ export const ESCOPOS_GOOGLE = {
   'google-ads': ['openid', 'email', 'https://www.googleapis.com/auth/adwords'],
 } as const;
 
-async function tokenGoogle(ctx: Ctx, alvo: keyof typeof ESCOPOS_GOOGLE): Promise<{ access: string; escopos: string[] } | Resultado> {
+export async function tokenGoogle(ctx: Ctx, alvo: keyof typeof ESCOPOS_GOOGLE): Promise<{ access: string; escopos: string[] } | Resultado> {
   const [id, secret, refresh] = await Promise.all([ctx.segredo('GOOGLE_OAUTH_CLIENT_ID'), ctx.segredo('GOOGLE_OAUTH_CLIENT_SECRET'), ctx.segredo(`${alvo}:refresh_token`)]);
   if (!id || !secret) return r('nao_configurado', 'O app OAuth do Google ainda não foi criado no Google Cloud.', { acao: 'Crie o cliente OAuth e cole as credenciais no servidor (ver passo a passo).' });
   if (!refresh) return r('nao_configurado', 'Nenhuma conta Google conectada.', { acao: 'Clique em "Conectar" e entre com a conta da Vendax.' });
@@ -87,43 +87,84 @@ async function emailGoogle(access: string) {
 const faltando = (pedidos: readonly string[], concedidos: string[]) =>
   pedidos.filter(s => !['openid', 'email'].includes(s) && !concedidos.includes(s)).map(s => s.replace('https://www.googleapis.com/auth/', ''));
 
-// ---------- Integrações sem API pública documentada (CRM, Vendax App, NextTags, Nexbox) ----------
-function generica(id: IntegracaoId, nome: string, prefixo: string, passos: string[]): Def {
+// ---------- Integrações com token e endpoint de leitura ----------
+function generica(id: IntegracaoId, nome: string, prefixo: string, passos: string[],
+  padrao?: { base: string; caminho: string; cabecalho: string }): Def {
   return {
-    id, metodo: 'Token de API (formato a confirmar com o fornecedor)',
+    id, metodo: 'Token de API · teste de leitura',
     credenciais: [
       { nome: `${prefixo}_TOKEN`, segredo: true, obrigatoria: true, descricao: 'Token de API somente leitura' },
-      { nome: `${prefixo}_BASE_URL`, segredo: false, obrigatoria: true, descricao: 'URL base da API (ex.: https://api.exemplo.com)' },
-      { nome: `${prefixo}_HEALTH_PATH`, segredo: false, obrigatoria: true, descricao: 'Caminho de uma leitura simples (ex.: /v1/me)' },
-      { nome: `${prefixo}_AUTH_HEADER`, segredo: false, obrigatoria: false, descricao: 'Cabeçalho do token (padrão: Authorization: Bearer)' },
+      { nome: `${prefixo}_BASE_URL`, segredo: false, obrigatoria: !padrao, descricao: padrao?.base ?? 'URL base da API (ex.: https://api.exemplo.com)' },
+      { nome: `${prefixo}_HEALTH_PATH`, segredo: false, obrigatoria: !padrao, descricao: padrao?.caminho ?? 'Caminho de uma leitura simples (ex.: /v1/me)' },
+      { nome: `${prefixo}_AUTH_HEADER`, segredo: false, obrigatoria: false, descricao: `Cabeçalho do token (padrão: ${padrao?.cabecalho ?? 'Authorization: Bearer'})` },
     ],
     conexao: { tipo: 'manual' }, passos,
     async testar(ctx) {
       const token = await ctx.segredo(`${prefixo}_TOKEN`);
       if (!token) return r('nao_configurado', `Nenhuma credencial do ${nome} cadastrada.`, { acao: 'Siga o passo a passo em "Conectar".' });
-      const base = ctx.config(`${prefixo}_BASE_URL`), caminho = ctx.config(`${prefixo}_HEALTH_PATH`);
+      const base = ctx.config(`${prefixo}_BASE_URL`) || padrao?.base;
+      const caminho = ctx.config(`${prefixo}_HEALTH_PATH`) || padrao?.caminho;
       if (!base || !caminho) return r('nao_testado', `Há token, mas a API do ${nome} não tem endpoint de verificação documentado publicamente.`, { acao: `Informe ${prefixo}_BASE_URL e ${prefixo}_HEALTH_PATH (uma leitura simples) no servidor.` });
-      const cab = ctx.config(`${prefixo}_AUTH_HEADER`) ?? 'Authorization: Bearer';
+      const cab = ctx.config(`${prefixo}_AUTH_HEADER`) || padrao?.cabecalho || 'Authorization: Bearer';
       const [h, pre] = cab.includes(':') ? [cab.split(':')[0].trim(), cab.split(':').slice(1).join(':').trim()] : [cab, ''];
-      const res = await get(new URL(caminho, base).toString(), { [h]: pre ? `${pre} ${token}` : token });
+      const url = new URL(caminho, base);
+      const statusDoVendax = id === 'vendax-app' && url.href === 'https://vendaxapp.tech/api/v1/escritorio/status';
+      const res = await get(url.href, { [h]: pre ? `${pre} ${token}` : token });
       if (res.status < 200 || res.status >= 300) return falhaHttp(nome, res.status, res.timeout, 'Gere um novo token e atualize no servidor.');
+      if (padrao && !res.json) return r('erro', `O endpoint de ${nome} não retornou dados de API.`, { acao: 'Confira a URL base e o caminho de leitura no servidor.' });
       const j = (res.json ?? {}) as Record<string, unknown>;
+      if (statusDoVendax && j.ok !== true) return r('erro', 'O Vendax App não confirmou a disponibilidade do serviço.');
       const conta = ['name', 'nome', 'company', 'empresa', 'email'].map(k => j[k]).find(v => typeof v === 'string') as string | undefined;
       return r('conectado', 'Leitura de teste respondeu com sucesso.', {
-        conta: conta ?? new URL(base).host, escopo: 'não verificável (a API não informa o escopo)', detalhes: { endpoint: caminho },
+        conta: conta ?? new URL(base).host,
+        escopo: statusDoVendax ? 'consulta de disponibilidade do serviço' : 'não verificável (a API não informa o escopo)',
+        detalhes: { endpoint: caminho },
       });
     },
   };
 }
 
+const ACAO_CRM = 'Emita um token somente leitura em CRM Vendax → Integração MCP.';
+
+export async function testarTokenCrm(token: string): Promise<Resultado> {
+  const res = await get('https://uktnpcuobzpokgmdiplw.supabase.co/functions/v1/mcp-server', {
+    Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream',
+  }, {
+    method: 'POST', redirect: 'error',
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'whoami', arguments: {} } }),
+  });
+  if (res.status !== 200) return falhaHttp('CRM Vendax', res.status, res.timeout, ACAO_CRM);
+  const rpc = res.json as { jsonrpc?: string; id?: number; result?: { isError?: boolean; structuredContent?: {
+    auth_mode?: string; read_only?: boolean; spaces?: unknown[];
+  } } } | null;
+  const identidade = rpc?.result?.structuredContent;
+  if (rpc?.jsonrpc !== '2.0' || rpc.id !== 1 || rpc.result?.isError || identidade?.auth_mode !== 'personal_token') {
+    return r('erro', 'O CRM Vendax não confirmou a identidade do token.', { acao: ACAO_CRM });
+  }
+  if (identidade.read_only !== true) return r('parcial', 'O token do CRM Vendax não tem escopo exclusivo de leitura.', { acao: ACAO_CRM });
+  const espacos = Array.isArray(identidade.spaces) ? identidade.spaces.length : 0;
+  if (!espacos) return r('parcial', 'O token é de leitura, mas não tem espaços disponíveis.', { acao: 'Confirme os espaços permitidos no CRM Vendax.' });
+  return r('conectado', 'Identidade e permissão de leitura confirmadas.', {
+    conta: 'CRM Vendax', escopo: 'somente leitura', detalhes: { espacos_acessiveis: espacos },
+  });
+}
+
 // ---------- Definições ----------
 export const DEFINICOES: Def[] = [
-  generica('crm', 'CRM Vendax', 'CRM_VENDAX', [
-    'Confirme qual sistema é o "CRM Vendax" (o próprio Vendax App ou outro).',
-    'No painel desse sistema, gere um token de API com permissão SOMENTE LEITURA.',
-    'Me informe a URL base da API e um caminho de leitura simples (ex.: /v1/me). Esses dois não são segredo.',
-    'Cole o token em .env.local na variável CRM_VENDAX_TOKEN e reinicie o app.',
-  ]),
+  {
+    id: 'crm', metodo: 'MCP · token pessoal de leitura',
+    credenciais: [{ nome: 'CRM_VENDAX_TOKEN', segredo: true, obrigatoria: true, descricao: 'Token somente leitura do CRM Vendax' }],
+    conexao: { tipo: 'manual' },
+    passos: [
+      'Abra crm.vendax.com.br → Integração MCP e emita um token de leitura para o Escritório.',
+      'Use Conectar CRM para validar o token e guardar a credencial no cofre do servidor.',
+    ],
+    async testar(ctx) {
+      const token = await ctx.segredo('CRM_VENDAX_TOKEN');
+      if (!token) return r('nao_configurado', 'Nenhuma credencial do CRM Vendax cadastrada.', { acao: ACAO_CRM });
+      return testarTokenCrm(token);
+    },
+  },
   {
     id: 'google-workspace', metodo: 'OAuth 2.0 (Google), somente leitura',
     credenciais: [
@@ -153,19 +194,18 @@ export const DEFINICOES: Def[] = [
     },
   },
   {
-    id: 'google-ads', metodo: 'OAuth 2.0 (Google) + developer token',
+    id: 'google-ads', metodo: 'OAuth 2.0 (Google) + acesso do projeto no Google Cloud',
     credenciais: [
       { nome: 'GOOGLE_OAUTH_CLIENT_ID', segredo: true, obrigatoria: true, descricao: 'Mesmo app OAuth do Google Workspace' },
       { nome: 'GOOGLE_OAUTH_CLIENT_SECRET', segredo: true, obrigatoria: true, descricao: 'Mesmo app OAuth do Google Workspace' },
-      { nome: 'GOOGLE_ADS_DEVELOPER_TOKEN', segredo: true, obrigatoria: true, descricao: 'Developer token da conta MCC' },
+      { nome: 'GOOGLE_ADS_DEVELOPER_TOKEN', segredo: true, obrigatoria: false, descricao: 'Token opcional para integrações legadas' },
       { nome: 'google-ads:refresh_token', segredo: true, obrigatoria: true, descricao: 'Obtido pelo botão "Conectar" (guardado cifrado)' },
       { nome: 'GOOGLE_ADS_API_VERSION', segredo: false, obrigatoria: false, descricao: 'Versão da API (padrão v25)' },
     ],
     conexao: { tipo: 'oauth', alvo: 'google-ads' },
     passos: [
       'Faça antes o passo a passo do Google Workspace (o app OAuth é o mesmo). No Google Cloud, ative também a "Google Ads API".',
-      'Entre em ads.google.com na conta de administrador (MCC) da Vendax → Admin (ícone de engrenagem) → Central de API: copie o developer token. Se ele estiver em "Acesso de teste", peça o "Acesso básico".',
-      'Cole o developer token em .env.local (GOOGLE_ADS_DEVELOPER_TOKEN) e reinicie o app.',
+      'Na visão geral da API Google Ads no Google Cloud, confirme que o projeto do cliente OAuth tem nível Exploração ou superior para acessar contas de produção.',
       'Recomendado: conecte com um usuário que tenha acesso "Somente leitura" às contas no Google Ads (o escopo da API não tem versão somente leitura).',
       'Clique em "Conectar" nesta tela e autorize com esse usuário.',
     ],
@@ -173,13 +213,19 @@ export const DEFINICOES: Def[] = [
       const dev = await ctx.segredo('GOOGLE_ADS_DEVELOPER_TOKEN');
       const t = await tokenGoogle(ctx, 'google-ads');
       if ('status' in t) return t;
-      if (!dev) return r('nao_configurado', 'Falta o developer token do Google Ads.', { acao: 'Siga o passo 2 em "Conectar".' });
       const v = ctx.config('GOOGLE_ADS_API_VERSION') ?? 'v25';
       const email = await emailGoogle(t.access);
-      const res = await get(`https://googleads.googleapis.com/${v}/customers:listAccessibleCustomers`, { Authorization: `Bearer ${t.access}`, 'developer-token': dev });
+      const falta = faltando(ESCOPOS_GOOGLE['google-ads'], t.escopos);
+      if (falta.length) return r('parcial', 'A conta Google não concedeu acesso à API Google Ads.', { conta: email, acao: 'Clique em "Reconectar" e autorize o acesso ao Google Ads.' });
+      const headers: Record<string, string> = { Authorization: `Bearer ${t.access}` };
+      if (dev) headers['developer-token'] = dev;
+      const res = await get(`https://googleads.googleapis.com/${v}/customers:listAccessibleCustomers`, headers);
       if (res.status !== 200) {
         const msg = JSON.stringify(res.json ?? '');
-        if (/DEVELOPER_TOKEN_NOT_APPROVED/.test(msg)) return r('parcial', 'Conectado, mas o developer token só tem acesso de teste.', { conta: email, acao: 'Peça "Acesso básico" na Central de API do Google Ads.' });
+        if (/CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION|DEVELOPER_TOKEN_NOT_APPROVED/.test(msg)) {
+          return r('parcial', 'O projeto ainda precisa de acesso à API do Google Ads para contas de produção.', { conta: email, acao: 'Confira o nível de acesso do projeto na visão geral da API Google Ads no Google Cloud.' });
+        }
+        if (/SERVICE_DISABLED/.test(msg)) return r('parcial', 'A API Google Ads está desativada no projeto do cliente OAuth.', { conta: email, acao: 'Ative a API Google Ads no Google Cloud.' });
         if (res.status === 404) return r('erro', `A versão ${v} da Google Ads API não existe mais.`, { conta: email, acao: 'Atualize GOOGLE_ADS_API_VERSION para a versão atual.' });
         return falhaHttp('Google Ads', res.status, res.timeout, 'Clique em "Reconectar".');
       }
@@ -190,14 +236,15 @@ export const DEFINICOES: Def[] = [
     },
   },
   {
-    id: 'meta-ads', metodo: 'Token de usuário do sistema (Meta Business), permissão ads_read',
+    id: 'meta-ads', metodo: 'Token da Meta com permissão ads_read',
     credenciais: [
-      { nome: 'META_ACCESS_TOKEN', segredo: true, obrigatoria: true, descricao: 'Token do usuário do sistema' },
+      { nome: 'META_ACCESS_TOKEN', segredo: true, obrigatoria: true, descricao: 'Token de usuário ou de usuário do sistema com ads_read' },
       { nome: 'META_GRAPH_VERSION', segredo: false, obrigatoria: false, descricao: 'Versão da Graph API (padrão v26.0)' },
     ],
     conexao: { tipo: 'manual' },
     passos: [
-      'Entre em business.facebook.com com o administrador do Gerenciador de Negócios da Vendax.',
+      'Para conectar todas as contas às quais seu usuário já tem acesso, emita um token de usuário com ads_read no Explorador da Graph API e estenda a validade no depurador da Meta.',
+      'Para usar um usuário do sistema, entre nas configurações do portfólio empresarial responsável pelas contas.',
       'Configurações do negócio → Usuários → Usuários do sistema → Adicionar: nome "Escritorio Vendax", função "Funcionário".',
       'Em "Atribuir ativos", adicione as contas de anúncios dos clientes com a permissão "Visualizar desempenho" (somente leitura).',
       'Clique em "Gerar novo token", escolha um app do negócio e marque SOMENTE ads_read (e business_management só se for listar contas pelo negócio). Não marque ads_management.',
@@ -211,8 +258,8 @@ export const DEFINICOES: Def[] = [
       const me = await get(`https://graph.facebook.com/${v}/me?fields=id,name`, h);
       if (me.status !== 200) {
         const code = (me.json as { error?: { code?: number } } | null)?.error?.code;
-        if (code === 190) return r('erro', 'Token da Meta expirado ou inválido.', { acao: 'Gere um novo token do usuário do sistema e atualize META_ACCESS_TOKEN.' });
-        return falhaHttp('Meta', me.status, me.timeout, 'Gere um novo token do usuário do sistema.');
+        if (code === 190) return r('erro', 'Token da Meta expirado ou inválido.', { acao: 'Renove o token com ads_read e atualize META_ACCESS_TOKEN.' });
+        return falhaHttp('Meta', me.status, me.timeout, 'Confira o token com ads_read.');
       }
       const perms = ((await get(`https://graph.facebook.com/${v}/me/permissions`, h)).json as { data?: { permission: string; status: string }[] } | null)?.data ?? [];
       const concedidas = perms.filter(p => p.status === 'granted').map(p => p.permission);
@@ -224,50 +271,48 @@ export const DEFINICOES: Def[] = [
         detalhes: { permissoes: concedidas, contas_de_anuncio: contas.length },
       };
       if (!concedidas.includes('ads_read') && !escrita) return r('parcial', 'Conectado, mas falta a permissão ads_read.', { ...base, acao: 'Gere o token de novo marcando ads_read.' });
-      if (!contas.length) return r('parcial', 'Conectado, mas nenhuma conta de anúncios foi atribuída a este usuário.', { ...base, acao: 'Atribua as contas de anúncios ao usuário do sistema.' });
+      if (!contas.length) return r('parcial', 'Conectado, mas nenhuma conta de anúncios está acessível para este usuário.', { ...base, acao: 'Confira na Meta quais contas de anúncios estão autorizadas para este usuário.' });
       return r('conectado', `${contas.length} conta(s) de anúncios acessível(is).`, base);
     },
   },
   {
-    id: 'reportei', metodo: 'Token de API (Bearer) · Reportei Connect',
+    id: 'reportei', metodo: 'Token de API (Bearer) · Reportei',
     credenciais: [
-      { nome: 'REPORTEI_TOKEN', segredo: true, obrigatoria: true, descricao: 'Token de API do Reportei Connect' },
-      { nome: 'REPORTEI_BASE_URL', segredo: false, obrigatoria: false, descricao: 'Padrão https://connect.reportei.com/api' },
+      { nome: 'REPORTEI_TOKEN', segredo: true, obrigatoria: true, descricao: 'Token da empresa no Reportei ou do merchant no Reportei Connect' },
+      { nome: 'REPORTEI_BASE_URL', segredo: false, obrigatoria: false, descricao: 'Padrão https://app.reportei.com/api. Para Reportei Connect, configure https://connect.reportei.com/api.' },
     ],
     conexao: { tipo: 'manual' },
     passos: [
       'Entre no Reportei com o administrador da conta da Vendax → Configurações da empresa → API Reportei.',
-      'Se a opção não existir no seu plano, a API (Reportei Connect) precisa ser liberada pelo suporte do Reportei: peça acesso de leitura.',
-      'Gere o token e cole em .env.local na variável REPORTEI_TOKEN. Reinicie o app.',
+      'Cadastre a credencial no servidor em REPORTEI_TOKEN. Para uma conta do Reportei Connect, configure também REPORTEI_BASE_URL.',
     ],
     async testar(ctx) {
       const tk = await ctx.segredo('REPORTEI_TOKEN');
       if (!tk) return r('nao_configurado', 'Nenhum token do Reportei cadastrado.', { acao: 'Siga o passo a passo em "Conectar".' });
-      const base = ctx.config('REPORTEI_BASE_URL') ?? 'https://connect.reportei.com/api';
-      const res = await get(`${base}/merchants/settings`, { Authorization: `Bearer ${tk}` });
+      const base = (ctx.config('REPORTEI_BASE_URL') || 'https://app.reportei.com/api').replace(/\/+$/, '');
+      const connect = new URL(base).hostname !== 'app.reportei.com';
+      const caminho = connect ? '/merchants/settings' : '/v2/companies/settings';
+      const res = await get(`${base}${caminho}`, { Authorization: `Bearer ${tk}` });
       if (res.status !== 200) return falhaHttp('Reportei', res.status, res.timeout, 'Gere um novo token em Configurações da empresa → API Reportei.');
-      const m = (res.json as { merchant?: { name?: string; total_customers?: number; rate_limit_per_minute?: string } })?.merchant;
+      const dados = res.json as { merchant?: { name?: string; total_customers?: number; rate_limit_per_minute?: string };
+        company?: { name?: string; rate_limits?: { per_minute?: number } } } | null;
+      const m = dados?.merchant;
+      const empresa = dados?.company;
+      if (connect ? !m : !empresa) return r('erro', 'O Reportei não confirmou a conta do token.', { acao: 'Confira se a URL é a da API que emitiu o token.' });
       return r('conectado', 'Configurações da conta lidas com sucesso.', {
-        conta: m?.name ?? null, escopo: 'não verificável (o Reportei não informa o escopo do token)',
-        detalhes: { clientes: m?.total_customers ?? 0, limite_por_minuto: m?.rate_limit_per_minute ?? 'não informado' },
+        conta: m?.name ?? empresa?.name ?? null, escopo: 'não verificável (o Reportei não informa o escopo do token)',
+        detalhes: { clientes: m?.total_customers ?? 'não informado', limite_por_minuto: m?.rate_limit_per_minute ?? empresa?.rate_limits?.per_minute ?? 'não informado' },
       });
     },
   },
   generica('nexttags', 'NextTags', 'NEXTTAGS', [
-    'A NextTags não publica documentação de API. Peça ao suporte (ou veja em Configurações → Integrações/API no painel) um token de API somente leitura.',
-    'Peça também a URL base da API e um endpoint de leitura simples (ex.: dados da conta).',
-    'Cole o token em .env.local (NEXTTAGS_TOKEN) e me passe a URL base e o caminho (não são segredo).',
-  ]),
-  generica('nexbox', 'Nexbox', 'NEXBOX', [
-    'A Nexbox não publica documentação de API. Peça ao suporte um token de API somente leitura.',
-    'Peça também a URL base da API e um endpoint de leitura simples.',
-    'Cole o token em .env.local (NEXBOX_TOKEN) e me passe a URL base e o caminho.',
-  ]),
+    'Na NexTags, abra Configurações → Integrações → Chave de API. Confirme os acessos da chave com o administrador da conta.',
+    'Cadastre a chave no servidor em NEXTTAGS_TOKEN. O teste consulta apenas a conta dona da chave.',
+  ], { base: 'https://app.nextagsai.com.br', caminho: '/api/accounts/me', cabecalho: 'X-ACCESS-TOKEN' }),
   generica('vendax-app', 'Vendax App', 'VENDAX_APP', [
-    'No backend do Vendax App, gere um token de serviço SOMENTE LEITURA para o Escritório (ou me diga onde ficam as chaves de API).',
-    'Me informe a URL base da API e um endpoint de leitura simples (ex.: /health ou /me).',
-    'Cole o token em .env.local (VENDAX_APP_TOKEN).',
-  ]),
+    'Para consultar a disponibilidade, configure a credencial dedicada no servidor do Vendax App em VENDAX_OFFICE_STATUS_TOKEN.',
+    'No servidor do Escritório, configure a mesma chave em VENDAX_APP_TOKEN e o caminho /api/v1/escritorio/status em VENDAX_APP_HEALTH_PATH.',
+  ], { base: 'https://vendaxapp.tech', caminho: '/api/v1/contacts?limit=1', cabecalho: 'Authorization: Bearer' }),
   {
     id: 'asaas', metodo: 'Chave de API (cabeçalho access_token)',
     credenciais: [
@@ -296,30 +341,9 @@ export const DEFINICOES: Def[] = [
       });
     },
   },
-  {
-    id: 'n8n', metodo: 'Chave de API (cabeçalho X-N8N-API-KEY)',
-    credenciais: [
-      { nome: 'N8N_API_KEY', segredo: true, obrigatoria: true, descricao: 'Chave da API pública do n8n' },
-      { nome: 'N8N_BASE_URL', segredo: false, obrigatoria: true, descricao: 'Endereço do n8n (ex.: https://n8n.vendax.com.br)' },
-    ],
-    conexao: { tipo: 'manual' },
-    passos: [
-      'Entre no n8n da Vendax → Settings → n8n API → Create an API key ("Escritorio Vendax"). Se houver escopos, marque só leitura de workflows/executions.',
-      'Cole a chave em .env.local (N8N_API_KEY) e o endereço do n8n em N8N_BASE_URL. Reinicie o app.',
-    ],
-    async testar(ctx) {
-      const tk = await ctx.segredo('N8N_API_KEY');
-      if (!tk) return r('nao_configurado', 'Nenhuma chave do n8n cadastrada.', { acao: 'Siga o passo a passo em "Conectar".' });
-      const base = ctx.config('N8N_BASE_URL');
-      if (!base) return r('nao_testado', 'Há chave, mas falta o endereço do n8n.', { acao: 'Defina N8N_BASE_URL no servidor.' });
-      const res = await get(new URL('/api/v1/workflows?limit=1', base).toString(), { 'X-N8N-API-KEY': tk });
-      if (res.status !== 200) return falhaHttp('n8n', res.status, res.timeout, 'Crie uma nova chave em Settings → n8n API.');
-      return r('conectado', 'API do n8n respondeu.', { conta: new URL(base).host, escopo: 'conforme os escopos da chave (o n8n não informa na resposta)' });
-    },
-  },
 ];
 
-// Provedor de IA dos agentes: fora da contagem das 10 integrações de dados, mas com o mesmo teste real.
+// O provedor de IA tem teste próprio e fica fora da contagem de integrações de dados.
 export const PROVEDOR_IA = { id: 'openai' as const, nome: 'OpenAI · provedor de IA dos agentes', icone: 'AI', escopo: 'uso de modelo', papeis: [...PAPEIS_PILOTO] };
 DEFINICOES.push({
   id: 'openai', metodo: 'Chave de API (Bearer), só no servidor',
@@ -352,6 +376,7 @@ DEFINICOES.push({
 });
 
 export const definicao = (id: string) => DEFINICOES.find(d => d.id === id);
+const IDS_TESTADOS = [...INTEGRACOES.map(i => i.id), PROVEDOR_IA.id];
 
 // ---------- Execução e histórico ----------
 // Remove qualquer segredo que a API tenha ecoado de volta antes de gravar ou exibir.
@@ -385,22 +410,22 @@ export async function testarIntegracao(b: Banco, id: string, origem: 'abertura' 
 }
 
 export async function testarTodas(b: Banco, origem: 'abertura' | 'manual' | 'agendado', por: string | null) {
-  return Promise.all([...INTEGRACOES.map(i => i.id), PROVEDOR_IA.id].map(id => testarIntegracao(b, id, origem, por)));
+  return Promise.all(IDS_TESTADOS.map(id => testarIntegracao(b, id, origem, por)));
 }
 
 // "Ao abrir a tela": testa o que não foi testado nos últimos `ms` (protege o limite de requisições das APIs).
 export async function testarDesatualizadas(b: Banco, ms: number, por: string | null) {
   const ult = new Map((await ultimosTestes(b)).map(t => [t.integracao_id, +new Date(t.testado_em)]));
   const agora = Date.now();
-  await Promise.all([...INTEGRACOES.map(i => i.id), PROVEDOR_IA.id].filter(id => !ult.has(id) || agora - ult.get(id)! > ms).map(id => testarIntegracao(b, id, 'abertura', por)));
+  await Promise.all(IDS_TESTADOS.filter(id => !ult.has(id) || agora - ult.get(id)! > ms).map(id => testarIntegracao(b, id, 'abertura', por)));
 }
 
 export type TesteGravado = Resultado & { id: number; integracao_id: string; origem: string; testado_em: string; duracao_ms: number | null };
 export async function ultimosTestes(q: Q) {
-  return q.query<TesteGravado>(`select distinct on (integracao_id) * from integracoes_testes order by integracao_id, testado_em desc, id desc`);
+  return q.query<TesteGravado>(`select distinct on (integracao_id) * from integracoes_testes where integracao_id = any($1::text[]) order by integracao_id, testado_em desc, id desc`, [IDS_TESTADOS]);
 }
 export async function historicoTestes(q: Q, limite = 100) {
-  return q.query<TesteGravado>('select * from integracoes_testes order by testado_em desc, id desc limit $1', [limite]);
+  return q.query<TesteGravado>('select * from integracoes_testes where integracao_id = any($1::text[]) order by testado_em desc, id desc limit $2', [IDS_TESTADOS, limite]);
 }
 
 // Quais credenciais existem (só nomes e presença; nunca valores).

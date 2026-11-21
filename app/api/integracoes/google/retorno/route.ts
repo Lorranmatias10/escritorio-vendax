@@ -8,7 +8,8 @@ import { testarIntegracao } from '@/lib/integracoes';
 export async function GET(req: Request) {
   const { b, u } = await contexto();
   const url = new URL(req.url);
-  const volta = (q: string) => NextResponse.redirect(new URL(`/integracoes?${q}`, url.origin));
+  const basePublica = process.env.VX_URL_BASE?.trim() || url.origin;
+  const volta = (q: string) => NextResponse.redirect(new URL(`/integracoes?${q}`, basePublica));
   const jar = await cookies();
   const [state, alvo] = (jar.get('vx_oauth_state')?.value ?? '').split(':');
   jar.delete('vx_oauth_state');
@@ -21,7 +22,7 @@ export async function GET(req: Request) {
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ code, client_id: id, client_secret: secret, grant_type: 'authorization_code',
-      redirect_uri: `${process.env.VX_URL_BASE ?? url.origin}/api/integracoes/google/retorno` }),
+      redirect_uri: new URL("/api/integracoes/google/retorno", basePublica).href }),
   });
   const j = (await res.json().catch(() => ({}))) as { refresh_token?: string };
   if (!res.ok || !j.refresh_token) return volta(`erro=troca_falhou&alvo=${alvo}`);

@@ -3,6 +3,7 @@
 import type { Q } from './db';
 import { filtroSql, podeVer, type Usuario } from './escopo';
 import type { EstadoTarefa } from './catalogo';
+import { atividadeAgentes } from './escritorio-ao-vivo';
 
 export type TarefaLista = {
   id: string; parent_id: string | null; objetivo: string; estado: EstadoTarefa; prazo: string | null; proximo_passo: string | null;
@@ -86,6 +87,7 @@ export type Papel = {
   estado_config: 'aguardando_configuracao' | 'em_homologacao' | 'habilitado' | 'desabilitado'; execucao_habilitada: boolean;
   versao_instrucao: string | null; vinculo_reservado: string | null;
   fontes: string[]; ferramentas: string[]; limites: string | null; como_desabilitar: string | null; homologado_com: string | null;
+  claude_homologado_com: string | null; claude_versao_instrucao: string | null;
 };
 
 export async function salas(q: Q, u: Usuario, estado?: string) {
@@ -114,14 +116,15 @@ export async function obterPapel(q: Q, u: Usuario, id: string) {
   const historico = await q.query<Execucao & { objetivo: string }>(
     `select e.*, p.nome as papel_nome, t.objetivo from execucoes e join tarefas t on t.id = e.tarefa_id join papeis p on p.id = e.papel_id
      where e.papel_id = $1 and ${escopo} order by e.atualizado_em desc limit 15`, params);
-  const [instrucoes, registro, homologacao] = await Promise.all([
+  const [instrucoes, registro, homologacao, homologacaoClaude] = await Promise.all([
     q.query<{ id: string; versao: string; estado: string; criado_em: string; conteudo: string }>(
       'select id, versao, estado, criado_em, conteudo from instrucoes where papel_id = $1 order by criado_em desc', [id]),
     q.query<{ id: number; acao: string; detalhe: string; ator: string; criado_em: string }>(
       'select id, acao, detalhe, ator, criado_em from registro_configuracao where papel_id = $1 order by id desc', [id]),
     ultimaHomologacao(q, id),
+    ultimaHomologacao(q, id, 'claude'),
   ]);
-  return { ...p, historico, instrucoes, registro, homologacao };
+  return { ...p, historico, instrucoes, registro, homologacao, homologacaoClaude };
 }
 
 // ---------- Clientes, entregas, incidentes ----------
@@ -190,27 +193,15 @@ export type CasoHomologacao = { caso: string; esperado: string; passou: boolean;
 // Cada delegação registrada vira uma "conversa": o papel que concluiu a etapa leva o trabalho ao papel de destino.
 // Respeita o mesmo escopo de visibilidade da tarefa de origem.
 export type Conversa = { id: string; de: string; para: string; quando: string; objetivo: string };
-export async function conversasRecentes(q: Q, u: Usuario, limite = 8) {
-  const params: unknown[] = [];
-  const f = filtroSql(u, params, 't.cliente_id', 't.area_interna');
-  params.push(limite);
-  const r = await q.query<Conversa>(
-    `select e.id::text as id, e.criado_em as quando, sub.papel_atual_id as para, sub.objetivo,
-       (select x.papel_id from execucoes x join tarefas tx on tx.id = x.tarefa_id
-        where (tx.id = t.id or tx.parent_id = t.id) and x.estado = 'concluida' and x.concluido_em <= e.criado_em
-        order by x.concluido_em desc limit 1) as de
-     from eventos_tarefa e
-     join tarefas t on t.id = e.tarefa_id
-     join tarefas sub on sub.id::text = e.dados->>'subtarefa'
-     where e.tipo = 'delegada' and e.criado_em > now() - interval '7 days' and ${f}
-     order by e.criado_em desc limit $${params.length}`, params);
-  return r.filter(c => c.de && c.para && c.de !== c.para);
+export async function conversasRecentes(q: Q, u: Usuario, limite = 8): Promise<Conversa[]> {
+  return (await atividadeAgentes(q, u, { somentePassagens: true, limite })).flatMap(c =>
+    c.para ? [{ id: c.id, de: c.de, para: c.para, quando: c.quando, objetivo: c.objetivo }] : []);
 }
 
-export async function ultimaHomologacao(q: Q, papel?: string) {
-  const params: unknown[] = [];
-  const filtro = papel ? (params.push(papel), 'where $1 = any(papeis)') : '';
-  const [ult] = await q.query<{ rodada: string }>(`select rodada from homologacoes ${filtro} order by executado_em desc, id desc limit 1`, params);
+export async function ultimaHomologacao(q: Q, papel?: string, tipo: 'padrao' | 'claude' = 'padrao') {
+  const [ult] = await q.query<{ rodada: string }>(`select rodada from homologacoes
+    where ($1::text is null or $1 = any(papeis)) and (coalesce(evidencia->>'provedor', '') like 'claude:%') = $2
+    order by executado_em desc, id desc limit 1`, [papel ?? null, tipo === 'claude']);
   if (!ult) return null;
   const casos = await q.query<CasoHomologacao>(
     `select h.caso, h.esperado, h.passou, h.evidencia, h.versao, h.rodada, h.executado_em, u.nome as executado_por

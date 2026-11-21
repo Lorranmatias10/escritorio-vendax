@@ -57,10 +57,12 @@ export async function criarSessao(q: Q, usuarioId: string) {
   return token;
 }
 
-export async function usuarioDaSessao(q: Q, token: string | undefined): Promise<Usuario | null> {
+export async function usuarioDaSessao(q: Q, token: string | undefined, { registrarVisita = true } = {}): Promise<Usuario | null> {
   if (!token) return null;
   const [s] = await q.query<{ usuario_id: string }>(
-    `update sessoes set visto_em = now() where token_hash = $1 and expira_em > now() returning usuario_id`, [sha256(token)]);
+    registrarVisita
+      ? 'update sessoes set visto_em = now() where token_hash = $1 and expira_em > now() returning usuario_id'
+      : 'select usuario_id from sessoes where token_hash = $1 and expira_em > now()', [sha256(token)]);
   return s ? carregarUsuario(q, s.usuario_id) : null;
 }
 

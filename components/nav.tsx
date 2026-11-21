@@ -11,6 +11,14 @@ const I = {
   agentes: <path d="M12 3v3m-5 3h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2Zm2 5h.01M15 14h.01M2 13v2m20-2v2" />,
   integracoes: <path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0V7Zm5 9v5" />,
   usuarios: <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 9a7 7 0 0 1 14 0" />,
+  atividade: <path d="M3 12h4l3-6 4 12 3-6h4" />,
+  chat: <path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H5l1.6-3A7.5 7.5 0 1 1 20 11.5ZM9 11h7m-7 3h4" />,
+  painel: <path d="M4 5h16v14H4zM14 5v14" />,
+  expandir: <path d="M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5" />,
+  mais: <path d="M5 12h14m-7-7v14" />,
+  menos: <path d="M5 12h14" />,
+  seta: <path d="M4 12h15m-5-5 5 5-5 5" />,
+  enviar: <path d="m3 10 18-6-6 16-4-7-8-3Zm8 3 10-9" />,
 } as const;
 
 const ITENS = [
@@ -34,12 +42,12 @@ export function Nav({ contadores, admin }: { contadores: { hoje: number; aprovac
           return (
             <li key={href} className="shrink-0">
               <Link href={href} aria-current={ativo ? 'page' : undefined}
-                className={`relative flex min-h-10 items-center gap-2.5 rounded-md px-3 text-sm font-medium transition-colors
+                title={nome} className={`vx-nav-link relative flex min-h-10 items-center gap-2.5 rounded-md px-3 text-sm font-medium transition-colors
                   ${ativo ? 'bg-vx-verde-claro text-vx-verde-escuro' : 'text-vx-texto-2 hover:bg-vx-fundo hover:text-vx-grafite'}`}>
                 {ativo && <span aria-hidden className="absolute bottom-1 left-0 top-1 hidden w-[3px] rounded-full bg-vx-verde lg:block" />}
                 <Icone nome={ic} />
-                <span className="whitespace-nowrap">{nome}</span>
-                {n > 0 && <span className={`tabular ml-auto rounded-md px-1.5 text-xs font-semibold ${k === 'integracoes' ? 'bg-vx-erro-claro text-vx-erro' : ativo ? 'bg-white text-vx-verde-escuro' : 'bg-vx-fundo text-vx-grafite'}`}>
+                <span className="vx-nav-text whitespace-nowrap">{nome}</span>
+                {n > 0 && <span className={`vx-nav-count tabular ml-auto rounded-md px-1.5 text-xs font-semibold ${k === 'integracoes' ? 'bg-vx-erro-claro text-vx-erro' : ativo ? 'bg-white text-vx-verde-escuro' : 'bg-vx-fundo text-vx-grafite'}`}>
                   {n}<span className="sr-only"> {k === 'integracoes' ? 'com erro' : 'pendentes'}</span></span>}
               </Link>
             </li>

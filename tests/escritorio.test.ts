@@ -4,7 +4,7 @@ import { carregarUsuario, type Usuario } from '@/lib/escopo';
 import { resetarDemonstracao, limparDemonstracao } from '@/lib/seed';
 import { dispararFluxoPiloto, simularFalha, simularFonteAusente } from '@/lib/demo';
 import { decidirAprovacao, retomarExecucao, desabilitarPapel, criarCliente, definirAcessoClientes } from '@/lib/orquestracao';
-import { homologarPiloto, homologarFase2, PAPEIS_FASE_2 } from '@/lib/homologacao';
+import { homologarPiloto, homologarFase2, homologarFase3, PAPEIS_FASE_2, PAPEIS_FASE_3 } from '@/lib/homologacao';
 import { lerCatalogoInstrucoes } from '@/lib/instrucoes';
 import { catalogo, hoje, listarAprovacoes, listarTarefas, obterTarefa, salas, listarIncidentes, obterPapel, conversasRecentes } from '@/lib/dados';
 import { PAPEIS, PAPEIS_PILOTO } from '@/lib/catalogo';
@@ -260,6 +260,25 @@ describe('homologação da fase 2', () => {
     expect(papel.homologacao?.casos).toHaveLength(4);
   });
 
+});
+
+describe('homologação da fase 3', () => {
+  it('só a direção homologa', async () => {
+    await expect(homologarFase3(b, await u('fabiana'))).rejects.toThrow(/direção/);
+  });
+
+  it('4 casos por fluxo passam e os 14 papéis restantes ficam habilitados em A1', async () => {
+    const r = await homologarFase3(b, await u('tiago'));
+    expect(r.resultados.filter(x => !x.passou)).toEqual([]);
+    expect(r.resultados).toHaveLength(56);
+    expect(r.aprovados.sort()).toEqual([...PAPEIS_FASE_3].sort());
+    const c = await catalogo(b);
+    expect(c.papeis.filter(p => p.fase === 'fase_3').map(p => p.id).sort()).toEqual([...PAPEIS_FASE_3].sort());
+    for (const p of c.papeis.filter(p => PAPEIS_FASE_3.includes(p.id)))
+      expect([p.estado_config, p.execucao_habilitada, p.modo, p.versao_instrucao]).toEqual(['habilitado', true, 'A1', '1.0']);
+    const [{ h }] = await b.query<{ h: number }>(`select count(*)::int h from tarefas where origem_evento_id like 'homolog-%'`);
+    expect(h).toBe(0);
+  });
 });
 
 describe('login próprio', () => {

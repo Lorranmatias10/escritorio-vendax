@@ -1,12 +1,17 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { randomUUID } from 'node:crypto';
 import { contexto } from '@/lib/sessao';
-import { obterPapel } from '@/lib/dados';
+import { clientesVisiveis, obterPapel } from '@/lib/dados';
 import { PAPEIS, ROTULO_FASE, MODOS, FONTES_CONFIRMADAS, INTEGRACOES } from '@/lib/catalogo';
 import { ultimosTestes, ROTULO_STATUS } from '@/lib/integracoes';
 import { dataHora } from '@/lib/formato';
-import { acaoSalvarInstrucao, acaoDesabilitarPapel } from '@/app/acoes';
+import { acaoSalvarInstrucao, acaoDesabilitarPapel, acaoHomologarEspecialista, acaoPedirAoEspecialista } from '@/app/acoes';
 import { EstadoConfigBadge, Secao, Vazio, Demo, botao, botaoSec, campo, Cabecalho, link, chip } from '@/components/ui';
+import { adaptadorDoPapel } from '@/lib/ia';
+import { FLUXOS_CLAUDE, fluxosDoPapel } from '@/lib/skills-claude';
+
+export const maxDuration = 120;
 
 const ESTADO_INSTRUCAO: Record<string, string> = { rascunho: 'Rascunho', em_homologacao: 'Em homologação', aprovada: 'Aprovada (ativa)', arquivada: 'Arquivada' };
 
@@ -20,6 +25,11 @@ export default async function Agente({ params }: PageProps<'/agentes/[id]'>) {
   const integ = INTEGRACOES.filter(i => (i.papeis as readonly string[]).includes(id));
   const atual = a.instrucoes.find(i => i.versao === a.versao_instrucao) ?? a.instrucoes[0];
   const [maior, menor] = (a.instrucoes[0]?.versao ?? '1.0').split('.').map(Number);
+  const fluxos = fluxosDoPapel(id);
+  const claude = fluxos.length ? await adaptadorDoPapel(id) : null;
+  const temChave = Boolean(process.env.ANTHROPIC_API_KEY);
+  const podePedir = claude && temChave && a.execucao_habilitada && claude.provedor === a.claude_homologado_com;
+  const clientes = podePedir ? (await clientesVisiveis(b, u)).filter(c => !c.demo) : [];
   return (
     <div className="space-y-5">
       <Cabecalho titulo={a.nome} trilha={<><Link href="/agentes" className={link}>Agentes</Link> <span aria-hidden>/</span> {a.nome}</>}
@@ -60,6 +70,41 @@ export default async function Agente({ params }: PageProps<'/agentes/[id]'>) {
           </form>
         )}
       </Secao>
+
+      {claude && (
+        <Secao titulo="Claude e Skills" id="claude">
+          <ul className="space-y-1 text-sm">
+            {fluxos.map(id => <li key={id}><strong>{FLUXOS_CLAUDE[id].nome}</strong> · {FLUXOS_CLAUDE[id].skills.join(', ')}</li>)}
+          </ul>
+          <p className="mt-2 text-sm text-vx-texto-2">
+            {!temChave ? 'A chave do Claude precisa estar disponível no serviço.' : claude.provedor.endsWith(':pacote-ausente') ? 'O pacote das Skills está indisponível.' : podePedir ? 'Habilitado em A1 para análise dos dados que você anexar.' : 'Aguardando homologação com dados fictícios.'}
+          </p>
+          {a.homologacaoClaude?.casos.filter(c => !c.passou && typeof c.evidencia.erro === 'string').map(c => (
+            <p key={c.caso} className="mt-1 text-sm text-vx-erro">{c.caso} · {String(c.evidencia.erro)}</p>
+          ))}
+          {u.perfil === 'admin' && temChave && !claude.provedor.endsWith(':pacote-ausente') && (
+            <form action={acaoHomologarEspecialista} className="mt-3">
+              <input type="hidden" name="papel" value={id} />
+              <button className={botaoSec}>{podePedir ? 'Homologar novamente' : 'Homologar e habilitar em A1'}</button>
+            </form>
+          )}
+          {podePedir && clientes.length > 0 && (
+            <form action={acaoPedirAoEspecialista} className="mt-4 grid gap-3 border-t border-vx-linha pt-4 text-sm sm:grid-cols-2">
+              <input type="hidden" name="id" value={randomUUID()} />
+              <label className="flex flex-col gap-1">Cliente<select className={campo} name="cliente" required>
+                <option value="">Selecione</option>{clientes.map(c => <option value={c.id} key={c.id}>{c.nome}</option>)}
+              </select></label>
+              <label className="flex flex-col gap-1">Área<select className={campo} name="fluxo" required>
+                {fluxos.map(id => <option value={id} key={id}>{FLUXOS_CLAUDE[id].nome}</option>)}
+              </select></label>
+              <label className="flex flex-col gap-1 sm:col-span-2">Objetivo<input name="objetivo" required minLength={3} maxLength={300} className={campo} /></label>
+              <label className="flex flex-col gap-1 sm:col-span-2">Dados para analisar<textarea name="dados" rows={5} required maxLength={20_000} className={campo} /></label>
+              <div><button className={botao}>Pedir análise</button></div>
+            </form>
+          )}
+          {podePedir && !clientes.length && <p className="mt-2 text-sm">Vincule um cliente a seu acesso para enviar um pedido.</p>}
+        </Secao>
+      )}
 
       {a.homologacao && (
         <Secao titulo={`Homologação · rodada ${a.homologacao.rodada.slice(0, 8)}`} id="homolog">

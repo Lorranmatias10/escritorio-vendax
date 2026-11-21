@@ -1,7 +1,20 @@
 // Teste automático das integrações a cada 30 minutos, dentro do próprio servidor (sem serviço extra).
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs' || process.env.VX_DB === 'memoria') return;
-  const g = globalThis as unknown as { __vxAgendaIntegracoes?: NodeJS.Timeout };
+  const g = globalThis as unknown as { __vxAgendaIntegracoes?: NodeJS.Timeout; __vxFilaDiretor?: NodeJS.Timeout };
+  if (!g.__vxFilaDiretor && process.env.NODE_ENV === 'production' && process.env.DATABASE_URL) {
+    let ocupada = false;
+    g.__vxFilaDiretor = setInterval(async () => {
+      if (ocupada) return;
+      ocupada = true;
+      try {
+        const [{ banco }, { processarFila }] = await Promise.all([import('./lib/db'), import('./lib/orquestracao')]);
+        await processarFila(await banco(), undefined, 8, undefined, true);
+      } catch (e) { console.error('[diretor] erro na fila:', e instanceof Error ? e.message : e); }
+      finally { ocupada = false; }
+    }, 5_000);
+    g.__vxFilaDiretor.unref();
+  }
   if (g.__vxAgendaIntegracoes) return;
   const rodar = async () => {
     try {

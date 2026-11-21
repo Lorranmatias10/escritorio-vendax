@@ -3,18 +3,16 @@ import { contexto } from '@/lib/sessao';
 import { catalogo, ultimaHomologacao } from '@/lib/dados';
 import { ROTULO_FASE, PAPEIS_PILOTO } from '@/lib/catalogo';
 import { dataHora } from '@/lib/formato';
-import { acaoHomologarPiloto, acaoHomologarFase2 } from '@/app/acoes';
-import { PAPEIS_FASE_2 } from '@/lib/homologacao';
+import { acaoHomologarPiloto, acaoHomologarFase2, acaoHomologarFase3 } from '@/app/acoes';
+import { PAPEIS_FASE_2, PAPEIS_FASE_3 } from '@/lib/homologacao';
+import { PAPEIS_CLAUDE } from '@/lib/skills-claude';
 import { EstadoConfigBadge, botao, link, Cabecalho } from '@/components/ui';
 
 export default async function Agentes() {
   const { b, u } = await contexto();
-  const [c, h, ...hs2] = await Promise.all([catalogo(b), ultimaHomologacao(b, PAPEIS_PILOTO[0]), ...PAPEIS_FASE_2.map(p => ultimaHomologacao(b, p))]);
-  // Fase 2: cada fluxo pode vir de uma rodada diferente; mostra a última de cada um, na rodada mais recente.
-  const r2 = hs2.filter(x => x !== null);
-  const h2 = r2.length ? { ...r2.reduce((a, x) => (x.executado_em > a.executado_em ? x : a)), casos: r2.flatMap(x => x.casos), aprovado: r2.length === PAPEIS_FASE_2.length && r2.every(x => x.aprovado) } : null;
-  const fase2 = c.papeis.filter(p => PAPEIS_FASE_2.includes(p.id));
+  const [c, h, h2, h3] = await Promise.all([catalogo(b), ultimaHomologacao(b, PAPEIS_PILOTO[0]), porFluxo(b, PAPEIS_FASE_2), porFluxo(b, PAPEIS_FASE_3)]);
   const piloto = c.papeis.filter(p => (PAPEIS_PILOTO as readonly string[]).includes(p.id));
+  const claude = c.papeis.filter(p => PAPEIS_CLAUDE.some(id => id === p.id));
   const habilitado = piloto.every(p => p.estado_config === 'habilitado');
   return (
     <div className="space-y-5">
@@ -36,20 +34,14 @@ export default async function Agentes() {
         <Resultado h={h} />
       </section>
 
-      <section id="fase2" aria-labelledby="h-fase2" className="scroll-mt-4 rounded-lg border border-vx-linha bg-vx-superficie shadow-vx p-4">
-        <div className="flex flex-wrap items-start gap-3">
-          <div className="mr-auto">
-            <h2 id="h-fase2" className="text-lg font-bold">Fase 2 · seis fluxos em A1 (consulta e rascunho)</h2>
-            <p className="text-sm text-vx-texto-2">Para cada fluxo: caso normal, dado ausente, duplicidade e fora de permissão, num banco isolado com contas fictícias. Cada papel só é habilitado se passar nos seus 4 casos.</p>
-            <ul className="mt-2 flex flex-wrap gap-2 text-sm">
-              {fase2.map(p => <li key={p.id} className="flex items-center gap-1.5"><Link href={`/agentes/${p.id}`} className={link}>{p.nome}</Link><EstadoConfigBadge estado={p.estado_config} /></li>)}
-            </ul>
-          </div>
-          {u.perfil === 'admin'
-            ? <form action={acaoHomologarFase2}><button className={botao}>{h2 ? 'Rodar a homologação da fase 2 de novo' : 'Homologar a fase 2 (A1)'}</button></form>
-            : <p className="text-sm text-vx-texto-2">Somente a direção homologa.</p>}
-        </div>
-        <Resultado h={h2} />
+      <SecaoFase id="fase2" titulo="Fase 2 · seis fluxos em A1 (consulta e rascunho)" papeis={c.papeis.filter(p => PAPEIS_FASE_2.includes(p.id))} h={h2} admin={u.perfil === 'admin'} acao={acaoHomologarFase2} rotulo="fase 2" />
+      <SecaoFase id="fase3" titulo="Fase 3 · catorze fluxos em A1 (consulta e rascunho)" papeis={c.papeis.filter(p => PAPEIS_FASE_3.includes(p.id))} h={h3} admin={u.perfil === 'admin'} acao={acaoHomologarFase3} rotulo="fase 3" />
+
+      <section className="rounded-lg border border-vx-linha bg-vx-superficie shadow-vx p-4">
+        <h2 className="text-lg font-bold">Especialistas com Skills do Claude</h2>
+        <ul className="mt-2 flex flex-wrap gap-3 text-sm">
+          {claude.map(p => <li key={p.id}><Link href={`/agentes/${p.id}#claude`} className={link}>{p.nome}</Link></li>)}
+        </ul>
       </section>
 
       <div className="overflow-x-auto rounded-lg border border-vx-linha bg-vx-superficie shadow-vx">
@@ -80,6 +72,33 @@ export default async function Agentes() {
 }
 
 type Rodada = NonNullable<Awaited<ReturnType<typeof ultimaHomologacao>>>;
+type PapelCat = Awaited<ReturnType<typeof catalogo>>['papeis'][number];
+
+// Cada fluxo pode vir de uma rodada diferente; mostra a última de cada um, na rodada mais recente.
+async function porFluxo(b: Parameters<typeof ultimaHomologacao>[0], papeis: string[]): Promise<Rodada | null> {
+  const r = (await Promise.all(papeis.map(p => ultimaHomologacao(b, p)))).filter(x => x !== null);
+  return r.length ? { ...r.reduce((a, x) => (x.executado_em > a.executado_em ? x : a)), casos: r.flatMap(x => x.casos), aprovado: r.length === papeis.length && r.every(x => x.aprovado) } : null;
+}
+
+function SecaoFase({ id, titulo, papeis, h, admin, acao, rotulo }: { id: string; titulo: string; papeis: PapelCat[]; h: Rodada | null; admin: boolean; acao: () => Promise<void>; rotulo: string }) {
+  return (
+    <section id={id} aria-labelledby={`h-${id}`} className="scroll-mt-4 rounded-lg border border-vx-linha bg-vx-superficie shadow-vx p-4">
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="mr-auto">
+          <h2 id={`h-${id}`} className="text-lg font-bold">{titulo}</h2>
+          <p className="text-sm text-vx-texto-2">Para cada fluxo: caso normal, dado ausente, duplicidade e fora de permissão, num banco isolado com contas fictícias. Cada papel só é habilitado se passar nos seus 4 casos.</p>
+          <ul className="mt-2 flex flex-wrap gap-2 text-sm">
+            {papeis.map(p => <li key={p.id} className="flex items-center gap-1.5"><Link href={`/agentes/${p.id}`} className={link}>{p.nome}</Link><EstadoConfigBadge estado={p.estado_config} /></li>)}
+          </ul>
+        </div>
+        {admin
+          ? <form action={acao}><button className={botao}>{h ? `Rodar a homologação da ${rotulo} de novo` : `Homologar a ${rotulo} (A1)`}</button></form>
+          : <p className="text-sm text-vx-texto-2">Somente a direção homologa.</p>}
+      </div>
+      <Resultado h={h} />
+    </section>
+  );
+}
 function Resultado({ h }: { h: Rodada | null }) {
   if (!h) return <p className="mt-3 text-sm text-vx-texto-2">Ainda não houve homologação.</p>;
   return (

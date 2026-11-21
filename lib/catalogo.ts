@@ -35,8 +35,8 @@ type Papel = {
 
 export const PAPEIS: Papel[] = [
   // 5º · Direção e Qualidade
-  { id: 'diretor_operacoes', departamento: 'direcao', nome: 'Diretor de Operações IA', fase: 'piloto', responsavel: 'Tiago',
-    faz: 'Prioriza tarefas, resolve conflitos de fila e encaminha decisões.', entrega: 'Briefing executivo com prioridades, donos, prazos e decisões pendentes.' },
+  { id: 'diretor_operacoes', departamento: 'direcao', nome: 'Diretor Geral IA', fase: 'piloto', responsavel: 'Tiago',
+    faz: 'Recebe pedidos, distribui o trabalho, revisa entregas e encaminha decisões fora da alçada.', entrega: 'Resposta consolidada com evidências, responsáveis e decisões pendentes.' },
   { id: 'auditor_qualidade', departamento: 'direcao', nome: 'Auditor de Qualidade', fase: 'piloto', responsavel: 'Tiago',
     faz: 'Confere amostras e entregas críticas com as fontes e identifica divergências.', entrega: 'Parecer com evidência, correção solicitada e responsável pela revisão.' },
   { id: 'curador_conhecimento', departamento: 'direcao', nome: 'Curador de Conhecimento', fase: 'fase_3', responsavel: 'Tiago',
@@ -65,8 +65,12 @@ export const PAPEIS: Papel[] = [
   { id: 'crm_conversao', departamento: 'atendimento', nome: 'Analista de CRM e Conversão', fase: 'fase_3', responsavel: 'Lígia, Fabiana e Tiago',
     faz: 'Localiza leads parados, follow-ups vencidos, perdas e faltas.', entrega: 'Lista de prioridades e relatório de conversão por etapa e motivo de perda.' },
   // 2º · Performance e Web
-  { id: 'midia_paga', departamento: 'performance', nome: 'Especialista em Mídia Paga', fase: 'fase_3', responsavel: 'Tiago e Lorran',
+  { id: 'midia_paga', departamento: 'performance', nome: 'Líder de Mídia Paga', fase: 'fase_3', responsavel: 'Tiago e Lorran',
     faz: 'Revê Google Ads e Meta Ads, propõe testes e prepara ajustes para aprovação.', entrega: 'Plano de otimização com evidência, efeito esperado e escopo da mudança.' },
+  { id: 'especialista_google_ads', departamento: 'performance', nome: 'Especialista em Google Ads', fase: 'fase_3', responsavel: 'Tiago e Lorran',
+    faz: 'Analisa campanhas, buscas e conversões na conta Google Ads confirmada do cliente.', entrega: 'Diagnóstico de Google Ads com período, conta, evidências e prioridades.' },
+  { id: 'especialista_meta_ads', departamento: 'performance', nome: 'Especialista em Meta Ads', fase: 'fase_3', responsavel: 'Tiago e Lorran',
+    faz: 'Analisa campanhas, criativos e conversões na conta Meta Ads confirmada do cliente.', entrega: 'Diagnóstico de Meta Ads com período, conta, evidências e prioridades.' },
   { id: 'dados_atribuicao', departamento: 'performance', nome: 'Analista de Dados e Atribuição', fase: 'fase_2', responsavel: 'Tiago e Lorran',
     faz: 'Cruza Ads e Reportei com CRM e agenda, quando o vínculo for verificável.', entrega: 'Relatório com período, fonte, conversão por etapa e lacunas de atribuição.',
     vinculo: 'Base Central de Tráfego (Relevance AI) · vínculo reservado, integração pendente.' },
@@ -110,7 +114,7 @@ const FONTES_DEPTO: Record<DepartamentoId, string[]> = {
   contas: ['CRM Vendax', 'Agenda', 'Notas de reunião', 'Escopo vigente'],
   atendimento: ['CRM de atendimento', 'Inbox por cliente', 'Agenda oficial da clínica', 'Ficha validada da clínica'],
   performance: ['Google Ads', 'Meta Ads', 'Reportei', 'WordPress', 'Perfil da Empresa no Google'],
-  whatsapp: ['NextTags', 'Nexbox', 'Vendax App', 'Logs autorizados'],
+  whatsapp: ['NextTags', 'Vendax App', 'Logs autorizados'],
   produto: ['Vendax App', 'Backlog', 'GitHub', 'Ambiente de homologação'],
   financeiro: ['Asaas', 'Notas fiscais', 'Contratos', 'Controles autorizados da Fabiana'],
 };
@@ -134,7 +138,7 @@ export function configuracaoPapel(p: Papel) {
   };
 }
 
-// Integrações (10). O status NÃO fica aqui: vem do health check real (lib/integracoes.ts).
+// O status das integrações vem do health check em lib/integracoes.ts.
 // papeis = agentes que dependem da integração. escopo = o mínimo que esses agentes precisam.
 export const INTEGRACOES = [
   { id: 'crm', nome: 'CRM Vendax', icone: 'CRM', escopo: 'leitura', observacao: 'Fonte oficial de contas, etapas e histórico.',
@@ -142,21 +146,17 @@ export const INTEGRACOES = [
   { id: 'google-workspace', nome: 'Google Workspace', icone: 'G', escopo: 'leitura', observacao: 'Agenda e notas de reunião (evento do piloto).',
     papeis: ['diretor_operacoes', 'gerente_contas', 'auditor_qualidade', 'sdr_followup', 'implantacao_entregas', 'curador_conhecimento'] },
   { id: 'google-ads', nome: 'Google Ads', icone: 'GA', escopo: 'leitura', observacao: 'Somente contas autorizadas.',
-    papeis: ['midia_paga', 'dados_atribuicao'] },
+    papeis: ['especialista_google_ads', 'midia_paga', 'dados_atribuicao'] },
   { id: 'meta-ads', nome: 'Meta Ads', icone: 'M', escopo: 'leitura', observacao: 'Somente contas autorizadas.',
-    papeis: ['midia_paga', 'dados_atribuicao'] },
+    papeis: ['especialista_meta_ads', 'midia_paga', 'dados_atribuicao'] },
   { id: 'reportei', nome: 'Reportei', icone: 'R', escopo: 'leitura', observacao: 'Relatórios de performance.',
     papeis: ['dados_atribuicao', 'midia_paga', 'gerente_contas', 'auditor_qualidade'] },
   { id: 'nexttags', nome: 'NextTags', icone: 'NT', escopo: 'leitura', observacao: 'WhatsApp e operação de atendimento.',
-    papeis: ['monitor_whatsapp', 'fluxos_campanhas_whatsapp', 'automacoes_bases_ia', 'copiloto_atendimento'] },
-  { id: 'nexbox', nome: 'Nexbox', icone: 'NB', escopo: 'leitura', observacao: 'WhatsApp e operação de atendimento.',
     papeis: ['monitor_whatsapp', 'fluxos_campanhas_whatsapp', 'automacoes_bases_ia', 'copiloto_atendimento'] },
   { id: 'vendax-app', nome: 'Vendax App', icone: 'VX', escopo: 'leitura', observacao: 'Produto próprio; logs e status autorizados.',
     papeis: ['produto_vendax_app', 'qa_integracoes', 'monitor_whatsapp', 'automacoes_bases_ia'] },
   { id: 'asaas', nome: 'Asaas', icone: 'A$', escopo: 'leitura', observacao: 'Financeiro · leitura apenas; acesso restrito a Tiago e Fabiana.',
     papeis: ['faturamento_cobranca', 'conciliacao_margem'] },
-  { id: 'n8n', nome: 'n8n', icone: 'n8n', escopo: 'leitura', observacao: 'Eventos e rotinas, quando aprovados.',
-    papeis: ['gerente_contas', 'automacoes_bases_ia'] },
 ] as const;
 export type IntegracaoId = (typeof INTEGRACOES)[number]['id'];
 

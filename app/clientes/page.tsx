@@ -37,13 +37,15 @@ export default async function Clientes({ searchParams }: PageProps<'/clientes'>)
       {sp.ok === 'cliente' && <p role="status" className="rounded-lg border border-vx-verde/30 bg-vx-verde-claro px-3 py-2.5 text-sm"><span aria-hidden className="mr-1.5 font-bold">✓</span>Cliente cadastrado. Libere o acesso da equipe em <Link href="/usuarios" className={link}>Usuários</Link>.</p>}
       {sp.erro && ERRO_CLIENTE[sp.erro] && <Aviso tom="erro">{ERRO_CLIENTE[sp.erro]}</Aviso>}
       <Cabecalho titulo="Clientes"
-        acoes={u.perfil === 'admin' && (
+        acoes={<div className="flex flex-wrap items-center gap-3">
+          <Link className={link} href={f.cliente ? `/clientes/memoria?cliente=${encodeURIComponent(f.cliente)}` : '/clientes/memoria'}>Memória operacional</Link>
+          {u.perfil === 'admin' && (
           <form action={acaoCriarCliente} className="flex flex-wrap items-center gap-2">
             <label htmlFor="novo-cliente" className="sr-only">Nome do novo cliente</label>
             <input id="novo-cliente" name="nome" required minLength={2} maxLength={120} placeholder="Nome do novo cliente" className={`${campo} w-56`} />
             <button className={botao}>Cadastrar cliente</button>
           </form>
-        )}
+        )}</div>}
         descricao={<>Tarefas, entregas e incidentes dos {clientes.length} cliente(s) que <strong className="font-semibold text-vx-grafite">{u.nome}</strong> pode acessar.</>}
         filtros={
           <BarraFiltros action="/clientes">
