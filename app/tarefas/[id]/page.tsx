@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { contexto } from '@/lib/sessao';
 import { obterTarefa } from '@/lib/dados';
+import { relatorioParaRetomar } from '@/lib/orquestracao';
 import { ROTULO_EVIDENCIA } from '@/lib/catalogo';
 import { dataHora } from '@/lib/formato';
 import { acaoRetomar } from '@/app/acoes';
@@ -23,8 +24,17 @@ export default async function Tarefa({ params, searchParams }: PageProps<'/taref
     );
   }
   const eventosDemo = t.demo;
+  const relatorioIncompleto = t.fonte === 'Chat com Diretor Geral' && t.estado === 'concluida'
+    ? await relatorioParaRetomar(b, u, t.id) : null;
   return (
     <div className="space-y-5">
+      {relatorioIncompleto && <Aviso tom="alerta">
+        <p>As fontes deste relatório ainda precisam ser consultadas.</p>
+        <form action={acaoRetomar} className="mt-2">
+          <input type="hidden" name="execucao" value={relatorioIncompleto} />
+          <button className={botaoSec}>Concluir relatório</button>
+        </form>
+      </Aviso>}
       {sp.repetido && <Aviso tom="alerta">Evento repetido recebido: a tarefa existente foi atualizada, sem criar outro registro.</Aviso>}
       <Cabecalho titulo={t.objetivo}
         trilha={<><Link href="/escritorio" className={link}>Escritório</Link> <span aria-hidden>/</span> <Link href={`/escritorio?sala=${t.departamento_id}`} className={link}>{t.departamento_nome}</Link>

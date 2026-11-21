@@ -9,7 +9,8 @@ import { ESCOPOS_GOOGLE } from '@/lib/integracoes';
 export async function GET(req: Request) {
   const { b, u } = await contexto();
   const url = new URL(req.url);
-  const volta = (q: string) => NextResponse.redirect(new URL(`/integracoes?${q}`, url.origin));
+  const basePublica = process.env.VX_URL_BASE?.trim() || url.origin;
+  const volta = (q: string) => NextResponse.redirect(new URL(`/integracoes?${q}`, basePublica));
   if (u.perfil !== 'admin') return volta('erro=sem_permissao');
   const alvo = url.searchParams.get('alvo');
   if (alvo !== 'google-workspace' && alvo !== 'google-ads') return volta('erro=alvo_invalido');
@@ -20,7 +21,7 @@ export async function GET(req: Request) {
   (await cookies()).set('vx_oauth_state', `${state}:${alvo}`, { httpOnly: true, sameSite: 'lax', path: '/', maxAge: 600 });
   const auth = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   auth.search = new URLSearchParams({
-    client_id: clientId, redirect_uri: `${process.env.VX_URL_BASE ?? url.origin}/api/integracoes/google/retorno`,
+    client_id: clientId, redirect_uri: new URL("/api/integracoes/google/retorno", basePublica).href,
     response_type: 'code', scope: ESCOPOS_GOOGLE[alvo].join(' '), access_type: 'offline', prompt: 'consent', state,
   }).toString();
   return NextResponse.redirect(auth);

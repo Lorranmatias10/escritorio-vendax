@@ -5,6 +5,8 @@ import { catalogo } from '@/lib/dados';
 import { DEFINICOES, PROVEDOR_IA, ROTULO_STATUS, historicoTestes, presencaCredenciais, testarDesatualizadas, ultimosTestes, type Status, type TesteGravado } from '@/lib/integracoes';
 import { dataHora } from '@/lib/formato';
 import { acaoTestarIntegracao, acaoTestarTodas } from '@/app/acoes';
+import { loginLigado } from '@/lib/auth';
+import { acaoConectarCrm } from './acoes-crm';
 import { botao, botaoSec, link, Cabecalho, Aviso } from '@/components/ui';
 
 const ESTILO: Record<Status, [string, string]> = {
@@ -16,6 +18,10 @@ const ESTILO: Record<Status, [string, string]> = {
 };
 const ORIGEM: Record<string, string> = { abertura: 'ao abrir a tela', manual: 'manual', agendado: 'automático (30 min)', conexao: 'após conectar' };
 const MSG: Record<string, string> = {
+  crm_configurado_servidor: 'A credencial do CRM Vendax está gerenciada pelo servidor.',
+  crm_token_invalido: 'Informe um token pessoal do CRM Vendax válido.',
+  crm_indisponivel: 'O CRM Vendax não respondeu. Tente validar o token novamente.',
+  crm_token_escopo: 'O CRM Vendax não confirmou um token somente leitura com acesso a espaços. Emita um token de leitura e tente de novo.',
   sem_permissao: 'Somente a direção conecta integrações.', alvo_invalido: 'Integração inválida.',
   oauth_nao_configurado: 'O app OAuth do Google ainda não está configurado no servidor. Veja o passo a passo do card.',
   cofre_sem_chave: 'O cofre do servidor está sem chave (VX_COFRE_CHAVE).', estado_invalido: 'A autorização expirou ou não veio deste app. Tente de novo.',
@@ -117,10 +123,21 @@ export default async function Integracoes({ searchParams }: PageProps<'/integrac
                   ? <Link href={conectarHref} prefetch={false} className={botao}>{status === 'nao_configurado' ? 'Conectar' : 'Reconectar'}</Link>
                   : <span className="text-xs text-vx-texto-2">“Conectar” fica disponível depois do app OAuth do Google (passos abaixo).</span>)}
               </div>
+              {i.id === 'crm' && u.perfil === 'admin' && loginLigado() && (
+                <form action={acaoConectarCrm} className="mt-3 flex flex-wrap items-end gap-2">
+                  <label className="grid gap-1 text-xs font-medium">
+                    Token de leitura do CRM
+                    <input name="token" type="password" autoComplete="off" spellCheck={false} maxLength={136} required
+                      className="rounded-md border border-vx-linha bg-vx-superficie px-3 py-2 text-sm" />
+                  </label>
+                  <button className={botao}>Conectar CRM</button>
+                </form>
+              )}
               <details className="mt-3">
                 <summary className="cursor-pointer font-medium text-vx-verde-escuro">{conectarHref ? 'Passo a passo para conectar' : status === 'nao_configurado' ? 'Conectar · passo a passo' : 'Reconectar · passo a passo'}</summary>
                 <ol className="mt-2 list-decimal space-y-1 pl-5">{d.passos.map((p, k) => <li key={k}>{p}</li>)}</ol>
-                <p className="mt-2 text-xs text-vx-texto-2">Onde colar: arquivo <code>.env.local</code> na pasta do Escritório (no servidor publicado, nas variáveis secretas do serviço). Nunca no chat nem nesta tela.</p>
+                {i.id === 'crm' ? <p className="mt-2 text-xs text-vx-texto-2">O token validado fica no cofre do servidor.</p>
+                  : <p className="mt-2 text-xs text-vx-texto-2">Onde colar: arquivo <code>.env.local</code> na pasta do Escritório (no servidor publicado, nas variáveis secretas do serviço). Nunca no chat nem nesta tela.</p>}
               </details>
               {hist.length > 0 && !ocultar(i.id) && (
                 <details className="mt-2">

@@ -1,15 +1,22 @@
 // Orquestração: fila persistida (tabela execucoes), executor sob demanda, delegação, aprovações.
 // Toda escrita passa por aqui: autorização centralizada (podeVer / alçada) e registro de eventos.
 import type { Banco, Q } from './db';
-import { podeVer, SemAcesso, type Usuario } from './escopo';
-import { SaidaAgente, adaptadorConfigurado, type AdaptadorModelo, type EntradaAgente } from './ia';
+import { carregarUsuario, podeVer, SemAcesso, type Usuario } from './escopo';
+import { SaidaAgente, adaptadorConfigurado, adaptadorDoPapel, claudeHomologado, type AdaptadorModelo, type EntradaAgente } from './ia';
+import { fluxoDoPapel, type FluxoClaude } from './skills-claude';
+import { consultaAds, consultarAnuncios } from './consulta-ads';
+import { fontesDaMemoria } from './memoria-vendax';
+import type { z } from 'zod';
+import { DIRETOR, delegacoesRelatorioAds, equipeDiretor, fluxoDiretor, historicoDiretor,
+  identificarClienteDiretor, pedidoDiretor, periodoAdsPadrao, periodoDoRelatorioAds } from './diretor';
 
 type TarefaRow = {
   id: string; parent_id: string | null; cliente_id: string | null; area_interna: string | null; departamento_id: string;
-  dono_humano_id: string | null; estado: string; demo: boolean; objetivo: string; origem_evento_id: string | null;
+  dono_humano_id: string | null; estado: string; demo: boolean; objetivo: string; origem_evento_id: string | null; criado_em: Date | string;
 };
-type Papel = { id: string; nome: string; fase: string; modo: string; estado_config: string; execucao_habilitada: boolean; versao_instrucao: string | null; homologado_com: string | null };
-type ExecRow = { id: string; tarefa_id: string; papel_id: string; etapa: string; estado: string; tentativas: number; entrada: EntradaAgente; demo: boolean };
+type Papel = { id: string; nome: string; fase: string; modo: string; estado_config: string; execucao_habilitada: boolean; versao_instrucao: string | null; homologado_com: string | null;
+  claude_homologado_com: string | null; claude_versao_instrucao: string | null };
+type ExecRow = { estado_anterior?: string; id: string; tarefa_id: string; papel_id: string; etapa: string; estado: string; tentativas: number; entrada: EntradaAgente; demo: boolean };
 
 export async function registrarEvento(q: Q, tarefaId: string, tipo: string, descricao: string, ator: string, dados?: unknown) {
   await q.query('insert into eventos_tarefa (tarefa_id, tipo, descricao, ator, dados) values ($1,$2,$3,$4,$5)', [tarefaId, tipo, descricao, ator, dados ?? null]);
@@ -38,22 +45,28 @@ export async function enfileirar(q: Q, tarefaId: string, papel: string, etapa: s
     `insert into execucoes (tarefa_id, papel_id, etapa, chave_dedup, estado, entrada, demo) values ($1,$2,$3,$4,'na_fila',$5,$6)
      on conflict (chave_dedup) do nothing returning id`,
     [tarefaId, papel, etapa, `${tarefaId}:${papel}:${etapa}`, entrada, demo]);
-  if (r.length) await registrarEvento(q, tarefaId, 'execucao_enfileirada', `Execução "${etapa}" enfileirada para ${papel}.`, 'sistema');
+  if (r.length) await registrarEvento(q, tarefaId, 'execucao_enfileirada', `Execução "${etapa}" enfileirada para ${papel}.`, 'sistema', { papel });
   return r[0]?.id ?? null;
 }
 
 // Delegação: cria (ou reaproveita) a subtarefa vinculada e enfileira a etapa do papel de destino.
-async function delegar(q: Q, pai: TarefaRow, papel: string, etapa: string, objetivo: string, entrada: EntradaAgente) {
+async function delegar(q: Q, pai: TarefaRow, de: string, papel: string, etapa: string, objetivo: string, entrada: EntradaAgente) {
   const depto = await deptoDoPapel(q, papel);
-  const origem = `${pai.id}:delegacao:${etapa}`;
+  const origem = entrada.contexto.diretor === true ? `${pai.id}:diretor_apoio:${papel}` : `${pai.id}:delegacao:${etapa}`;
   const [sub] = await q.query<{ id: string }>(
     `insert into tarefas (parent_id, cliente_id, area_interna, departamento_id, papel_atual_id, dono_humano_id, objetivo, fonte, origem_evento_id, estado, demo, criterio_conclusao, proximo_passo)
      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'na_fila',$10,'Execução do papel concluída com saída válida', 'Executar etapa: ' || $11)
      on conflict (origem_evento_id) do update set atualizado_em = now() returning id`,
     [pai.id, pai.cliente_id, pai.area_interna, depto, papel, pai.dono_humano_id, objetivo, `Delegada pela tarefa ${pai.id.slice(0, 8)}`, origem, pai.demo, etapa]);
-  await registrarEvento(q, pai.id, 'delegada', `Subtarefa delegada para ${papel}: ${objetivo}`, 'sistema', { subtarefa: sub.id });
+  await registrarEvento(q, pai.id, 'delegada', `Subtarefa delegada para ${papel}: ${objetivo}`, 'sistema', { subtarefa: sub.id, de, para: papel });
   await registrarEvento(q, sub.id, 'criada', `Recebida por delegação da tarefa de origem.`, 'sistema', { origem: pai.id });
-  await enfileirar(q, sub.id, papel, etapa, entrada, pai.demo);
+  const anterior = entrada.contexto.relatorio_reaberto === true && await q.query(
+    `update execucoes set estado = 'na_fila', entrada = $2, saida = null, erro = null, concluido_em = null,
+       disponivel_em = now(), atualizado_em = now()
+     where tarefa_id = $1 and etapa = $3 and estado in ('concluida', 'falhou') returning id`, [sub.id, entrada, etapa]);
+  if (anterior && anterior.length) await q.query(
+    "update tarefas set estado = 'na_fila', objetivo = $2, motivo_bloqueio = null where id = $1", [sub.id, objetivo]);
+  else await enfileirar(q, sub.id, papel, etapa, entrada, pai.demo);
   return sub.id;
 }
 
@@ -100,88 +113,245 @@ export async function receberEventoReuniao(b: Banco, u: Usuario, ev: EventoReuni
 // Um pedido = uma tarefa do papel, etapa "analisar" em A1: o papel prepara o rascunho e o dono humano revisa (aprovação).
 export type PedidoPapel = {
   id: string; papel_id: string; cliente_id: string | null; area_interna: string | null; dono_id: string; objetivo: string;
-  conteudo_recuperado: EntradaAgente['conteudo_recuperado']; demo: boolean;
+  conteudo_recuperado: EntradaAgente['conteudo_recuperado']; demo: boolean; fluxo_claude?: FluxoClaude; mensagem_chat?: string; consulta_ads?: z.infer<typeof consultaAds>;
 };
 
 export async function receberPedido(b: Banco, u: Usuario, p: PedidoPapel) {
   if (!podeVer(u, p.cliente_id, p.area_interna)) throw new SemAcesso('Sem acesso ao cliente ou à área deste pedido.');
   return b.transacao(async q => {
-    const [existente] = await q.query<{ id: string; origem_recebimentos: number }>('select id, origem_recebimentos from tarefas where origem_evento_id = $1', [p.id]);
-    if (existente) {
-      const n = existente.origem_recebimentos + 1;
-      await q.query('update tarefas set origem_recebimentos = $2, atualizado_em = now() where id = $1', [existente.id, n]);
-      await registrarEvento(q, existente.id, 'evento_repetido', `Pedido de origem recebido de novo (${n}ª vez). Nenhum registro duplicado.`, u.nome, { origem: p.id });
-      return { tarefaId: existente.id, repetido: true };
-    }
     const depto = await deptoDoPapel(q, p.papel_id);
     const [dono] = await q.query<{ nome: string }>('select nome from usuarios where id = $1', [p.dono_id]);
     const [t] = await q.query<{ id: string }>(
       `insert into tarefas (cliente_id, area_interna, departamento_id, papel_atual_id, dono_humano_id, objetivo, fonte, origem_evento_id, estado, demo, criterio_conclusao, proximo_passo)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,'na_fila',$9,'Dono humano revisou o rascunho do papel','Papel prepara o rascunho') returning id`,
-      [p.cliente_id, p.area_interna, depto, p.papel_id, p.dono_id, p.objetivo, `Pedido ${p.id}${p.demo ? ' · Demonstração' : ''}`, p.id, p.demo]);
-    await registrarEvento(q, t.id, 'criada', `Tarefa criada a partir do pedido ${p.id}.`, u.nome);
+       values ($1,$2,$3,$4,$5,$6,$7,$8,'na_fila',$9,'Dono humano revisou o rascunho do papel','Papel prepara o rascunho')
+       on conflict (origem_evento_id) do nothing returning id`,
+      [p.cliente_id, p.area_interna, depto, p.papel_id, p.dono_id, p.objetivo, p.mensagem_chat ? 'Chat com especialista' : `Pedido ${p.id}${p.demo ? ' · Demonstração' : ''}`, p.id, p.demo]);
+    if (!t) {
+      const [existente] = await q.query<{ id: string; origem_recebimentos: number; cliente_id: string | null; area_interna: string | null }>(
+        `update tarefas set origem_recebimentos = origem_recebimentos + 1, atualizado_em = now()
+         where origem_evento_id = $1 returning id, origem_recebimentos, cliente_id, area_interna`, [p.id]);
+      if (!existente || !podeVer(u, existente.cliente_id, existente.area_interna)) throw new SemAcesso();
+      await registrarEvento(q, existente.id, 'evento_repetido', `Pedido de origem recebido de novo (${existente.origem_recebimentos}ª vez). Nenhum registro duplicado.`, u.nome, { origem: p.id });
+      return { tarefaId: existente.id, repetido: true };
+    }
+    await registrarEvento(q, t.id, 'criada', p.mensagem_chat ? 'Pedido enviado pelo chat com especialista.' : `Tarefa criada a partir do pedido ${p.id}.`, u.nome);
     await enfileirar(q, t.id, p.papel_id, 'analisar', {
       papel_id: p.papel_id, etapa: 'analisar',
-      instrucao_operacional: `${p.objetivo}. Prepare a entrega do seu papel como rascunho para revisão. Não envie nada.`,
-      conteudo_recuperado: p.conteudo_recuperado, contexto: { dono_nome: dono?.nome },
+      instrucao_operacional: `${p.mensagem_chat ?? p.objetivo}. Prepare a entrega do seu papel como rascunho para revisão. Não envie nada.`,
+      conteudo_recuperado: p.conteudo_recuperado, contexto: { dono_nome: dono?.nome, fluxo_claude: p.fluxo_claude, mensagem_chat: p.mensagem_chat, consulta_ads: p.consulta_ads },
     }, p.demo);
     return { tarefaId: t.id, repetido: false };
   });
 }
 
-// ---------- Executor (sob demanda; sem serviço permanente por especialista) ----------
-export async function processarFila(b: Banco, adaptador: AdaptadorModelo = adaptadorConfigurado(), limite = 25) {
+async function contextoDaConversa(q: Q, u: Usuario, canal: string | null, escopo: string | null) {
+  const historico = (await historicoDiretor(q, u, canal, 6, escopo)).filter(h => h.resposta).slice(-3);
+  return historico.map(h => ({ fonte: 'Conversa anterior com o Diretor', texto: `${h.mensagem.slice(0, 1200)}\n${h.resposta!.slice(0, 1600)}` }));
+}
+
+export async function registrarPedidoDiretor(b: Banco, u: Usuario, entrada: unknown) {
+  const pedido = pedidoDiretor.parse(entrada);
+  const autonomia = pedido.autonomia ?? (pedido.criar_tarefas ? 'executar' : 'delegar');
+  if (!podeVer(u, pedido.cliente, 'direcao')) throw new SemAcesso('Sem acesso a este cliente.');
+  return b.transacao(async q => {
+    if (pedido.cliente && !(await q.query('select id from clientes where id = $1 and not demo', [pedido.cliente])).length)
+      throw new SemAcesso('Cliente indisponível para este pedido.');
+    const identificacao = pedido.cliente ? null : await identificarClienteDiretor(q, u, pedido.mensagem);
+    const escopo = pedido.cliente ?? identificacao?.cliente?.id ?? null;
+    const origem = `diretor:${u.id}:${pedido.id}`;
+    const [t] = await q.query<{ id: string }>(
+      `insert into tarefas (cliente_id, area_interna, departamento_id, papel_atual_id, dono_humano_id,
+         objetivo, fonte, origem_evento_id, estado, criterio_conclusao, proximo_passo)
+       values ($1,$2,'direcao',$3,$4,$5,'Chat com Diretor Geral',$6,'na_fila',
+         'Diretor entregou a resposta no chat', 'Preparar a resposta')
+       on conflict (origem_evento_id) do nothing returning id`,
+      [escopo, escopo ? null : 'direcao', DIRETOR, u.id, pedido.mensagem.replace(/\s+/g, ' ').slice(0, 150), origem]);
+    if (!t) {
+      const [ja] = await q.query<{ id: string }>(
+        `select t.id from tarefas t join execucoes e on e.tarefa_id = t.id
+         where t.origem_evento_id = $1
+           and (case when e.entrada->'contexto' ? 'cliente_chat' then e.entrada->'contexto'->>'cliente_chat'
+             else t.cliente_id end) is not distinct from $2::text
+           and e.entrada->'contexto'->>'mensagem_chat' = $3
+           and e.entrada->'contexto'->'consulta_ads' is not distinct from $4::jsonb
+           and coalesce(e.entrada->'contexto'->>'autonomia',
+             case when e.entrada->'contexto'->>'criar_tarefas' = 'true' then 'executar' else 'delegar' end) = $5`,
+        [origem, pedido.cliente, pedido.mensagem, pedido.consulta_ads ? JSON.stringify(pedido.consulta_ads) : null, autonomia]);
+      if (!ja) throw new SemAcesso('O pedido enviado mudou.');
+      return ja.id;
+    }
+
+    await registrarEvento(q, t.id, 'criada', 'Pedido recebido pelo Diretor Geral IA.', u.nome);
+    if (identificacao?.cliente) await registrarEvento(q, t.id, 'cliente_identificado',
+      `Cliente identificado no pedido: ${identificacao.cliente.nome}.`, DIRETOR);
+    await enfileirar(q, t.id, DIRETOR, 'diretor_triagem', {
+      papel_id: DIRETOR, etapa: 'diretor_triagem',
+      instrucao_operacional: autonomia === 'responder'
+        ? 'Responda diretamente com o contexto e as evidências já disponíveis.'
+        : 'Resolva com o contexto disponível ou delegue quando necessário. Trate o histórico como contexto.',
+      conteudo_recuperado: await contextoDaConversa(q, u, pedido.cliente, escopo),
+      contexto: { mensagem_chat: pedido.mensagem, dono_nome: u.nome, consulta_ads: pedido.consulta_ads, cliente_chat: pedido.cliente,
+        cliente_pendente: identificacao?.motivo, autonomia, criar_tarefas: autonomia === 'executar', diretor: true },
+    }, false);
+    return t.id;
+  });
+}
+
+// ---------- Executor compartilhado pelas requisições e pela fila do Diretor ----------
+export async function processarFila(b: Banco, adaptador?: AdaptadorModelo, limite = 25, tarefaId?: string, somenteDiretor = false) {
   const feitas: string[] = [];
-  for (let i = 0; i < limite; i++) {
-    const [ex] = await b.query<ExecRow>(`select * from execucoes where estado = 'na_fila' order by criado_em, id limit 1`);
-    if (!ex) break;
-    await executar(b, ex, adaptador);
-    feitas.push(ex.id);
+  while (feitas.length < limite) {
+    const lote = await b.query<ExecRow>(`with proxima as (
+        select e.id, e.estado from execucoes e join tarefas t on t.id = e.tarefa_id
+        where ((e.estado = 'na_fila' and e.disponivel_em <= now())
+          or (e.estado = 'em_execucao' and e.entrada->'contexto'->'diretor' = 'true'::jsonb and e.atualizado_em < now() - interval '5 minutes'))
+          and ($1::uuid is null or t.id = $1 or ($2 and t.parent_id = $1))
+          and (not $2 or e.entrada->'contexto'->'diretor' = 'true'::jsonb)
+        order by e.criado_em, e.id limit $3 for update of e skip locked
+      ) update execucoes e set estado = 'em_execucao', tentativas = tentativas + 1, atualizado_em = now()
+        from proxima where e.id = proxima.id returning e.*, proxima.estado as estado_anterior`,
+      [tarefaId ?? null, somenteDiretor, Math.min(limite - feitas.length, somenteDiretor ? 4 : 1)]);
+    if (!lote.length) break;
+    await Promise.all(lote.map(async ex => {
+      if (ex.entrada.contexto.diretor === true && ex.tentativas > 2 && ex.estado_anterior === 'em_execucao') {
+        await finalizarFalha(b, ex, 'O servidor interrompeu as tentativas anteriores de execução.', 'falhou');
+        return;
+      }
+      const destino = adaptador ?? (ex.entrada.contexto.fluxo_claude ? await adaptadorDoPapel(ex.papel_id) : adaptadorConfigurado());
+      if (!adaptador && ex.entrada.contexto.diretor === true && destino.provedor === 'simulado-local')
+        await finalizarFalha(b, ex, 'Configure o provedor de IA do Diretor Geral.', 'bloqueada');
+      else await executar(b, ex, destino);
+    }));
+    feitas.push(...lote.map(ex => ex.id));
   }
   return feitas;
 }
 
 async function executar(b: Banco, ex: ExecRow, adaptador: AdaptadorModelo) {
-  const tentativa = ex.tentativas + 1;
-  await b.query(`update execucoes set estado = 'em_execucao', tentativas = $2, provedor = $3, atualizado_em = now() where id = $1`, [ex.id, tentativa, adaptador.provedor]);
+  const tentativa = ex.tentativas;
+  const diretor = ex.entrada.contexto.diretor === true;
+  await b.query(`update execucoes set provedor = $2 where id = $1 and tentativas = $3`, [ex.id, adaptador.provedor, tentativa]);
   await b.query(`update tarefas set estado = 'em_execucao', papel_atual_id = $2, atualizado_em = now() where id = $1`, [ex.tarefa_id, ex.papel_id]);
   const [papel] = await b.query<Papel>('select * from papeis where id = $1', [ex.papel_id]);
 
   // Habilitado = homologado. Antes disso, só o piloto roda, e só em demonstração. Papel desabilitado nunca roda.
   // A habilitação vale para o provedor/modelo homologado; outro provedor só roda em demonstração.
-  const homologadoAqui = papel.execucao_habilitada && papel.homologado_com === adaptador.provedor;
+  const comClaude = Boolean(ex.entrada.contexto.fluxo_claude);
+  const homologadoCom = comClaude ? papel.claude_homologado_com : papel.homologado_com;
+  const versaoInstrucao = comClaude ? papel.claude_versao_instrucao : papel.versao_instrucao;
+  const homologadoAqui = papel.execucao_habilitada && (comClaude
+    ? await claudeHomologado(ex.papel_id, homologadoCom, adaptador.provedor)
+    : homologadoCom === adaptador.provedor);
   // Fases posteriores rodam em demonstração só enquanto estão em homologação (banco isolado da homologação).
   const podeRodar = homologadoAqui || (ex.demo && (papel.fase === 'piloto' ? papel.estado_config !== 'desabilitado' : papel.estado_config === 'em_homologacao'));
   if (!podeRodar) {
-    const msg = papel.execucao_habilitada && papel.homologado_com !== adaptador.provedor
-      ? `${papel.nome} foi homologado com ${papel.homologado_com ?? 'outro provedor'}; o provedor atual é ${adaptador.provedor}. Rode a homologação de novo.`
+    const msg = papel.execucao_habilitada && homologadoCom !== adaptador.provedor
+      ? `${papel.nome} foi homologado com ${homologadoCom ?? 'outro provedor'}; o provedor atual é ${adaptador.provedor}. Rode a homologação de novo.`
       : papel.estado_config === 'desabilitado' && papel.fase === 'piloto'
       ? `Execução desabilitada para ${papel.nome} (papel desabilitado pela direção).`
       : `Execução desabilitada para ${papel.nome} (aguarda instrução e homologação).`;
-    await b.query(`update execucoes set estado = 'falhou', erro = $2, atualizado_em = now() where id = $1`, [ex.id, msg]);
-    await b.query(`update tarefas set estado = 'bloqueada', motivo_bloqueio = $2 where id = $1`, [ex.tarefa_id, msg]);
-    await registrarEvento(b, ex.tarefa_id, 'execucao_bloqueada', msg, 'sistema');
+    await finalizarFalha(b, ex, msg, 'bloqueada');
     return;
   }
-  // Instrução: a versão ativa do papel; antes da homologação, a versão mais recente em homologação.
+
   const [instr] = await b.query<{ versao: string; conteudo: string }>(
     `select versao, conteudo from instrucoes where papel_id = $1 and ($2::text is null or versao = $2) order by criado_em desc limit 1`,
-    [ex.papel_id, papel.versao_instrucao]);
-  await b.query('update execucoes set versao_instrucao = $2 where id = $1', [ex.id, instr?.versao ?? null]);
+    [ex.papel_id, versaoInstrucao]);
+  await b.query('update execucoes set versao_instrucao = $2 where id = $1 and tentativas = $3', [ex.id, instr?.versao ?? null, tentativa]);
 
   try {
-    const saida = garantirContrato(ex.entrada, SaidaAgente.parse(await adaptador.executar(ex.entrada, instr ?? null, tentativa)), papel);
+    await registrarEvento(b, ex.tarefa_id, 'execucao_iniciada', `${papel.nome} iniciou a etapa "${ex.etapa}".`, ex.papel_id);
+    const entradaAnterior = await recuperarEscopoDoPedido(b, ex);
+    const entrada = await prepararEntrada(b, entradaAnterior ? { ...ex, entrada: entradaAnterior } : ex);
+    const saida = garantirContrato(entrada, SaidaAgente.parse(await adaptador.executar(entrada, instr ?? null, tentativa)), papel);
     await b.transacao(async q => {
-      await aplicarEfeitos(q, ex, saida, papel);
-      await q.query(`update execucoes set estado = 'concluida', saida = $2, erro = null, concluido_em = now(), atualizado_em = now() where id = $1`, [ex.id, saida]);
+      if (!await execucaoAtual(q, ex)) return;
+      const retorno = await aplicarEfeitos(q, diretor ? { ...ex, entrada } : ex, saida, papel);
+      await q.query(`update execucoes set estado = 'concluida', saida = $2, erro = null, concluido_em = now(), atualizado_em = now() where id = $1`, [ex.id, retorno ?? saida]);
       await registrarEvento(q, ex.tarefa_id, 'execucao_concluida', `${papel.nome} concluiu "${ex.etapa}" (tentativa ${tentativa}).`, ex.papel_id);
+      if (diretor && ex.etapa === 'analisar') await filaDeRetorno(q, await carregarTarefa(q, ex.tarefa_id));
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    await b.query(`update execucoes set estado = 'falhou', erro = $2, atualizado_em = now() where id = $1`, [ex.id, msg]);
-    await b.query(`update tarefas set estado = 'falhou', motivo_bloqueio = $2, proximo_passo = 'Retomar a execução após corrigir a causa', atualizado_em = now() where id = $1`, [ex.tarefa_id, msg]);
-    await registrarEvento(b, ex.tarefa_id, 'execucao_falhou', `Falha na tentativa ${tentativa}: ${msg}`, ex.papel_id);
+    await finalizarFalha(b, ex, msg, 'falhou');
   }
+}
+
+async function execucaoAtual(q: Q, ex: ExecRow) {
+  const [atual] = await q.query('select id from execucoes where id = $1 and tentativas = $2 and estado = $3 for update',
+    [ex.id, ex.tentativas, 'em_execucao']);
+  return Boolean(atual);
+}
+
+async function finalizarFalha(b: Banco, ex: ExecRow, msg: string, estado: 'bloqueada' | 'falhou') {
+  await b.transacao(async q => {
+    if (!await execucaoAtual(q, ex)) return;
+    const temporaria = estado === 'falhou' && ex.entrada.contexto.diretor === true && ex.tentativas < 2
+      && /tempo|timeout|HTTP (429|5\d\d)|conexão|fetch failed|abort/i.test(msg);
+    await q.query(`update execucoes set estado = $2, erro = $3, atualizado_em = now(),
+       disponivel_em = now() + ($4::int * interval '1 second') where id = $1`,
+      [ex.id, temporaria ? 'na_fila' : 'falhou', msg, temporaria ? 10 : 0]);
+    await q.query(`update tarefas set estado = $3, motivo_bloqueio = $2, proximo_passo = $4, atualizado_em = now() where id = $1`,
+      [ex.tarefa_id, msg, temporaria ? 'na_fila' : estado, temporaria ? 'Nova tentativa automática agendada' : 'Retomar após corrigir a causa']);
+    await registrarEvento(q, ex.tarefa_id, temporaria ? 'retomada_agendada' : estado === 'bloqueada' ? 'execucao_bloqueada' : 'execucao_falhou', msg, ex.papel_id);
+    if (!temporaria && ex.entrada.contexto.diretor === true && ex.etapa === 'analisar')
+      await filaDeRetorno(q, await carregarTarefa(q, ex.tarefa_id));
+  });
+}
+
+// Pedidos de versões anteriores podem ter uma referência a cliente gravada no canal interno.
+async function recuperarEscopoDoPedido(b: Banco, ex: ExecRow): Promise<EntradaAgente | null> {
+  const contexto = ex.entrada.contexto;
+  if (ex.etapa !== 'diretor_triagem' || Object.hasOwn(contexto, 'cliente_chat') || typeof contexto.mensagem_chat !== 'string') return null;
+  const mensagem = contexto.mensagem_chat;
+  return b.transacao(async q => {
+    if (!await execucaoAtual(q, ex)) return null;
+    const t = await carregarTarefa(q, ex.tarefa_id);
+    if (t.cliente_id || !t.dono_humano_id) return null;
+    const u = await carregarUsuario(q, t.dono_humano_id);
+    if (!u) return null;
+    const { cliente, motivo } = await identificarClienteDiretor(q, u, mensagem);
+    if (!cliente && !motivo) return null;
+    const entrada = {
+      ...ex.entrada,
+      conteudo_recuperado: await contextoDaConversa(q, u, null, cliente?.id ?? null),
+      contexto: { ...contexto, cliente_chat: null, cliente_pendente: motivo },
+    };
+    if (cliente) {
+      await q.query('update tarefas set cliente_id = $2, area_interna = null where id = $1', [t.id, cliente.id]);
+      await registrarEvento(q, t.id, 'cliente_identificado', `Cliente identificado no pedido: ${cliente.nome}.`, DIRETOR);
+    }
+    await q.query('update execucoes set entrada = $2 where id = $1', [ex.id, entrada]);
+    return entrada;
+  });
+}
+
+async function prepararEntrada(q: Q, ex: ExecRow): Promise<EntradaAgente> {
+  if (ex.demo) return ex.entrada;
+  const t = await carregarTarefa(q, ex.tarefa_id);
+  const autor = t.dono_humano_id ? await carregarUsuario(q, t.dono_humano_id) : null;
+  if (!autor) {
+    if (ex.entrada.contexto.diretor === true) throw new SemAcesso('Responsável indisponível para este pedido.');
+    return ex.entrada;
+  }
+  if (!podeVer(autor, t.cliente_id, t.area_interna)) throw new SemAcesso('Acesso do responsável ao escopo da tarefa está indisponível.');
+  const fontes = ex.entrada.contexto.relatorio_ads === true
+    ? [] : await fontesDaMemoria(q, autor, t.cliente_id, t.area_interna, t.id);
+  const p = consultaAds.safeParse(ex.entrada.contexto.consulta_ads);
+  const plataforma = ex.entrada.contexto.fluxo_claude;
+  if (p.success && t.cliente_id && (plataforma === 'google_ads' || plataforma === 'meta_ads') && fluxoDoPapel(plataforma, ex.papel_id)) {
+    fontes.push(await consultarAnuncios(q, autor, t.cliente_id, plataforma, p.data));
+  }
+  const contexto = { ...ex.entrada.contexto };
+  if (ex.etapa === 'diretor_triagem' || ex.etapa === 'diretor_revisao') {
+    contexto.equipe_autorizada = contexto.autonomia === 'responder'
+      ? [] : (await equipeDiretor(q, autor, t.cliente_id)).map(p => ({ id: p.id, nome: p.nome, faz: p.faz }));
+    contexto.escopo = t.cliente_id ?? 'Operação interna da Vendax';
+    contexto.periodo_padrao_ads = periodoAdsPadrao();
+    if (typeof contexto.mensagem_chat === 'string')
+      contexto.periodo_solicitado_ads = periodoDoRelatorioAds(contexto.mensagem_chat, t.criado_em);
+  }
+  return { ...ex.entrada, contexto, conteudo_recuperado: [...fontes, ...ex.entrada.conteudo_recuperado] };
 }
 
 // Garantias do contrato que não dependem do modelo: o sistema sabe quais fontes foram entregues e se estão disponíveis.
@@ -206,21 +376,31 @@ function garantirContrato(e: EntradaAgente, s: SaidaAgente, papel: Papel): Saida
 // Efeitos de cada etapa. Todos idempotentes (chaves de deduplicação), para retomada sem duplicar.
 async function aplicarEfeitos(q: Q, ex: ExecRow, s: SaidaAgente, papel: Papel) {
   const t = await carregarTarefa(q, ex.tarefa_id);
-  for (const [i, f] of s.fontes.entries()) await evidencia(q, t.id, ex.id, `${ex.id}:fonte:${i}`, 'fonte', `${f.nome}${f.disponivel ? '' : ' — Integração pendente'}`, f.referencia);
-  if (s.rascunho) await evidencia(q, t.id, ex.id, `${ex.id}:rascunho`, 'rascunho', s.rascunho);
+  const chaveEvidencia = ex.entrada.contexto.relatorio_reaberto === true ? `${ex.id}:${ex.tentativas}` : ex.id;
+  for (const [i, f] of s.fontes.entries()) await evidencia(q, t.id, ex.id, `${chaveEvidencia}:fonte:${i}`, 'fonte', `${f.nome}${f.disponivel ? '' : ' — Integração pendente'}`, f.referencia);
+  if (s.rascunho) await evidencia(q, t.id, ex.id, `${chaveEvidencia}:rascunho`, 'rascunho', s.rascunho);
   const concluirSub = async () => {
     await q.query(`update tarefas set estado = 'concluida', motivo_bloqueio = null, proximo_passo = $2, atualizado_em = now() where id = $1`, [t.id, s.proxima_acao]);
   };
   const pai = t.parent_id ? await carregarTarefa(q, t.parent_id) : t;
 
-  if (ex.etapa === 'organizar') {
+  if (ex.etapa === 'diretor_triagem') {
+    return delegarDiretor(q, t, ex, s);
+  } else if (ex.etapa === 'diretor_revisao') {
+    return fecharPedidoDiretor(q, t, ex, s);
+  } else if (ex.etapa === 'analisar' && ex.entrada.contexto.diretor === true) {
+    const pendencia = ex.entrada.conteudo_recuperado.filter(f => f.disponivel === false).map(f => f.fonte).join(', ');
+    if (pendencia) await q.query(`update tarefas set estado = 'bloqueada', motivo_bloqueio = $2,
+      proximo_passo = $3, atualizado_em = now() where id = $1`, [t.id, `Fonte indisponível: ${pendencia}`, s.proxima_acao]);
+    else await concluirSub();
+  } else if (ex.etapa === 'organizar') {
     // A1 (consulta e rascunho): os itens ficam no rascunho. A2+ grava as entregas pelo fluxo autorizado.
     if (papel.modo !== 'A1') for (const [i, it] of (s.itens ?? []).entries())
       if (t.cliente_id) await q.query(
         `insert into entregas (cliente_id, tarefa_id, chave_dedup, titulo, estado, demo) values ($1,$2,$3,$4,'planejada',$5) on conflict (chave_dedup) do nothing`,
         [t.cliente_id, t.id, `${t.id}:entrega:${i}`, `${it.titulo}${it.prazo ? ` (prazo citado: ${it.prazo})` : ''}`, t.demo]);
     await q.query(`update tarefas set estado = 'em_execucao', proximo_passo = $2, atualizado_em = now() where id = $1`, [t.id, s.proxima_acao]);
-    await delegar(q, t, 'auditor_qualidade', 'auditar', 'Auditar o plano da carteira contra a reunião', {
+    await delegar(q, t, ex.papel_id, 'auditor_qualidade', 'auditar', 'Auditar o plano da carteira contra a reunião', {
       ...ex.entrada, papel_id: 'auditor_qualidade', etapa: 'auditar',
       instrucao_operacional: 'Confira o plano com a fonte. Aponte prazos, números ou escopos sem confirmação.',
       conteudo_recuperado: [...ex.entrada.conteudo_recuperado, { fonte: 'Relatório de performance (Reportei)', texto: '', disponivel: false, resolve: 'Lorran (integrações)' }],
@@ -229,7 +409,7 @@ async function aplicarEfeitos(q: Q, ex: ExecRow, s: SaidaAgente, papel: Papel) {
     await concluirSub();
     for (const [i, a] of s.afirmacoes.filter(x => x.tipo === 'fato').entries())
       await evidencia(q, pai.id, ex.id, `${ex.id}:achado:${i}`, 'fonte', `Auditor: ${a.texto}`, 'Transcrição da reunião');
-    await delegar(q, pai, 'diretor_operacoes', 'priorizar', 'Priorizar o briefing e definir quem decide', {
+    await delegar(q, pai, ex.papel_id, 'diretor_operacoes', 'priorizar', 'Priorizar o briefing e definir quem decide', {
       ...ex.entrada, papel_id: 'diretor_operacoes', etapa: 'priorizar',
       instrucao_operacional: 'Priorize, atribua quem decide e coloque o briefing em Hoje. Nenhuma ação externa.',
       contexto: { ...ex.entrada.contexto, lacunas: s.lacunas,
@@ -267,16 +447,190 @@ async function aplicarEfeitos(q: Q, ex: ExecRow, s: SaidaAgente, papel: Papel) {
   }
 }
 
+async function delegarDiretor(q: Q, t: TarefaRow, ex: ExecRow, s: SaidaAgente) {
+  const { autonomia: modo, mensagem_chat, cliente_pendente, relatorio_reaberto } = ex.entrada.contexto;
+  const mensagem = typeof mensagem_chat === 'string' ? mensagem_chat : '';
+  const relatorio = modo === 'responder' ? [] : delegacoesRelatorioAds(mensagem);
+  if (!t.cliente_id && (cliente_pendente || relatorio.length)) {
+    const pendencia = cliente_pendente === 'ambiguidade' ? 'Há mais de um cliente possível. Selecione o cliente em “Cliente ou operação”.'
+      : 'Selecione um cliente autorizado em “Cliente ou operação” para continuar.';
+    return fecharPedidoDiretor(q, t, ex, { ...s, rascunho: 'Preciso confirmar o cliente antes de continuar.', pendencia_diretor: pendencia });
+  }
+  if (modo === 'responder') return fecharPedidoDiretor(q, t, ex, s);
+  const { delegacoes = [], periodo_ads, excecao } = s.plano_diretor ?? {};
+  if (!delegacoes.length && !relatorio.length) {
+    if (s.rascunho?.trim()) return fecharPedidoDiretor(q, t, ex, s);
+    if (!s.plano_diretor) return fecharPedidoDiretor(q, t, ex, { ...s, rascunho: 'Preciso de um detalhe para encaminhar.',
+      pendencia_diretor: s.pendencia_diretor ?? 'Indique o relatório ou a fonte que a equipe deve consultar.' });
+  }
+  const u = t.dono_humano_id ? await carregarUsuario(q, t.dono_humano_id) : null;
+  if (!u || !podeVer(u, t.cliente_id, t.area_interna)) throw new SemAcesso();
+  const autorizados = new Set((await equipeDiretor(q, u, t.cliente_id)).map(p => p.id));
+  const periodos = consultaAds.safeParse(ex.entrada.contexto.consulta_ads).data
+    ?? periodoDoRelatorioAds(mensagem, t.criado_em) ?? periodo_ads ?? periodoAdsPadrao();
+  const outrasDelegacoes = delegacoes.filter(d => !relatorio.some(canal => canal.papel === d.papel));
+  const destinos = [...new Map([...relatorio, ...outrasDelegacoes].map(d => [d.papel, d.objetivo])).entries()].slice(0, 4);
+  for (const [papel, objetivo] of destinos) {
+    if (!autorizados.has(papel)) continue;
+    const fluxo = fluxoDiretor(papel);
+    const canalAds = fluxo === 'google_ads' || fluxo === 'meta_ads';
+    const relatorioAds = canalAds && relatorio.length > 0;
+    await delegar(q, t, DIRETOR, papel, 'analisar', objetivo, {
+      papel_id: papel, etapa: 'analisar',
+      instrucao_operacional: `Pedido delegado pelo Diretor Geral: ${objetivo}\nUse a conta e o cliente da tarefa. Cite as fontes e separe dados, lacunas e recomendações.`,
+      conteudo_recuperado: [],
+      contexto: { diretor: true, dono_nome: u.nome, objetivo_delegado: objetivo, fluxo_claude: fluxo,
+        consulta_ads: canalAds ? periodos : undefined, relatorio_ads: relatorioAds, relatorio_reaberto },
+    });
+  }
+  const papeisIndisponiveis = destinos.some(([p]) => !autorizados.has(p));
+  await q.query(`update tarefas set estado = 'em_execucao', motivo_bloqueio = null,
+      proximo_passo = $2, atualizado_em = now() where id = $1`,
+    [t.id, destinos.length ? 'Acompanhar análises delegadas' : 'Consolidar resposta ao pedido']);
+  await filaDeRetorno(q, t, {
+    plano: s.resumo, excecao, papeisIndisponiveis, periodo_ads: periodos,
+  });
+  return { ...s, plano_diretor: { delegacoes: destinos.map(([papel, objetivo]) => ({ papel, objetivo })), periodo_ads: periodos, excecao } };
+}
+
+async function filaDeRetorno(q: Q, tarefa: TarefaRow, triagem?: Record<string, unknown>) {
+  const raiz = tarefa.parent_id ?? tarefa.id;
+  await q.query('select id from tarefas where id = $1 for update', [raiz]);
+  const [origem] = await q.query<Pick<ExecRow, 'entrada'> & { saida: SaidaAgente | null }>(
+    `select entrada, saida from execucoes where tarefa_id = $1 and etapa = 'diretor_triagem'`, [raiz]);
+  if (!origem) return;
+  const apoios = await q.query<{ id: string; nome: string; estado: string; motivo_bloqueio: string | null; saida: SaidaAgente | null }>(
+    `select t.id, p.nome, t.estado, t.motivo_bloqueio, e.saida
+       from tarefas t join execucoes e on e.tarefa_id = t.id and e.etapa = 'analisar'
+       join papeis p on p.id = e.papel_id
+       where t.parent_id = $1 and e.entrada->'contexto'->'diretor' = 'true'::jsonb order by p.ordem, t.id`, [raiz]);
+  if (apoios.some(a => a.estado === 'na_fila' || a.estado === 'em_execucao')) return;
+  const plano = triagem ?? {
+    plano: origem.saida?.resumo, excecao: origem.saida?.plano_diretor?.excecao,
+    papeisIndisponiveis: (origem.saida?.plano_diretor?.delegacoes.length ?? 0) > apoios.length,
+  };
+  const entrada: EntradaAgente = {
+    papel_id: DIRETOR, etapa: 'diretor_revisao',
+    instrucao_operacional: 'Revise a solicitação original e os retornos. Consolide uma resposta única, priorizando os dados do período pedido. Assuntos históricos só entram se explicarem os números. Quando o pedido for de mídia, trate a ausência de CRM ou agenda como limite da atribuição, salvo se o cruzamento foi solicitado.',
+    conteudo_recuperado: [...origem.entrada.conteudo_recuperado, ...apoios.map(a => ({
+      fonte: a.nome, disponivel: a.estado === 'concluida',
+      texto: JSON.stringify({ estado: a.estado, bloqueio: a.motivo_bloqueio, resumo: a.saida?.resumo,
+        analise: a.saida?.rascunho?.slice(0, 6000), fontes: a.saida?.fontes, lacunas: a.saida?.lacunas }).slice(0, 10_000),
+    }))],
+    contexto: { ...origem.entrada.contexto, ...plano,
+      apoios_incompletos: apoios.filter(a => a.estado !== 'concluida').map(a => a.nome) },
+  };
+
+  const nova = await enfileirar(q, raiz, DIRETOR, 'diretor_revisao', entrada, false);
+  if (!nova) {
+    // Uma análise retomada pode substituir a resposta parcial no mesmo fio.
+    const [atualizada] = await q.query(
+      `update execucoes set entrada = $2, estado = 'na_fila', disponivel_em = now(), atualizado_em = now()
+         where tarefa_id = $1 and etapa = 'diretor_revisao' and estado in ('concluida', 'falhou')
+         returning id`, [raiz, entrada]);
+    if (!atualizada) return;
+  }
+  await q.query(`update tarefas set estado = 'em_execucao', proximo_passo = 'Diretor revisa os retornos',
+     atualizado_em = now() where id = $1`, [raiz]);
+  if (tarefa.parent_id) await registrarEvento(q, raiz, 'retorno_especialistas', 'Retornos prontos para revisão da direção.', DIRETOR);
+}
+
+async function fecharPedidoDiretor(q: Q, t: TarefaRow, ex: ExecRow, s: SaidaAgente): Promise<SaidaAgente> {
+  const { papeisIndisponiveis, apoios_incompletos } = ex.entrada.contexto;
+  const incompletos = Array.isArray(apoios_incompletos) ? apoios_incompletos : [];
+  const bloqueio = [
+    s.pendencia_diretor,
+    papeisIndisponiveis ? 'Um especialista solicitado está indisponível neste escopo.' : '',
+    incompletos.length ? `Apoio pendente de ${incompletos.join(', ')}.` : '',
+  ].filter(Boolean).join(' ');
+  const u = t.dono_humano_id ? await carregarUsuario(q, t.dono_humano_id) : null;
+  if (!u || !podeVer(u, t.cliente_id, t.area_interna)) throw new SemAcesso();
+  const tarefasCriadas: string[] = [];
+  if (!bloqueio && ex.entrada.contexto.criar_tarefas === true) {
+    const equipe = new Map((await equipeDiretor(q, u, t.cliente_id)).map(p => [p.id, p]));
+    const titulos = new Set<string>();
+    for (const item of (s.itens ?? []).slice(0, 5)) {
+      const papel = equipe.get(item.dono);
+      const titulo = item.titulo.trim().replace(/\s+/g, ' ').slice(0, 240);
+      if (!papel || titulo.length < 3 || titulos.has(titulo.toLowerCase())) continue;
+      titulos.add(titulo.toLowerCase());
+      const donoProposto = papel.responsavel.split(' e ')[0].toLocaleLowerCase('pt-BR');
+      const [responsavel] = await q.query<{ id: string }>('select id from usuarios where lower(nome) = $1', [donoProposto]);
+      const dono = responsavel ? await carregarUsuario(q, responsavel.id) : null;
+      const [nova] = await q.query<{ id: string }>(
+        `insert into tarefas (parent_id, cliente_id, area_interna, departamento_id, papel_atual_id, dono_humano_id, objetivo,
+         fonte, origem_evento_id, estado, criterio_conclusao, proximo_passo)
+         values ($1,$2,$3,$4,$5,$6,$7,'Atribuída pelo Diretor Geral',$8,'na_fila','Responsável registra o resultado','Executar e registrar o resultado')
+         on conflict (origem_evento_id) do nothing returning id`,
+        [t.id, t.cliente_id, t.area_interna, papel.departamento, papel.id, dono && podeVer(dono, t.cliente_id, t.area_interna) ? dono.id : u.id,
+          titulo, `${t.id}:diretor_pendencia:${titulo.toLowerCase()}`]);
+      if (!nova) continue;
+      tarefasCriadas.push(titulo);
+      await registrarEvento(q, nova.id, 'criada', 'Tarefa interna criada a pedido do solicitante.', DIRETOR);
+      await registrarEvento(q, t.id, 'delegada', `Pendência atribuída a ${papel.nome}.`, DIRETOR, { subtarefa: nova.id, de: DIRETOR, para: papel.id });
+    }
+  }
+
+  if (!bloqueio && ex.entrada.contexto.relatorio_reaberto === true) {
+    const entregues = await q.query<{ id: string }>(
+      `update tarefas set estado = 'concluida', proximo_passo = 'Relatório entregue na tarefa de origem',
+        atualizado_em = now() where parent_id = $1 and estado = 'na_fila'
+        and fonte = 'Atribuída pelo Diretor Geral' and objetivo ilike 'Consolidar relat%' returning id`, [t.id]);
+    for (const tarefa of entregues) await registrarEvento(q, tarefa.id, 'relatorio_entregue', 'O relatório foi entregue na tarefa de origem.', DIRETOR);
+  }
+  const rascunho = [s.rascunho ?? s.resumo, bloqueio && `Pendência: ${bloqueio}`,
+    tarefasCriadas.length > 0 && `Tarefas registradas no Escritório:\n${tarefasCriadas.map(titulo => `• ${titulo}`).join('\n')}`]
+    .filter(Boolean).join('\n\n');
+  await q.query(`update tarefas set estado = $2, motivo_bloqueio = $3, em_hoje = $4,
+     proximo_passo = $5, atualizado_em = now() where id = $1`,
+    [t.id, bloqueio ? 'bloqueada' : 'concluida', bloqueio || null, Boolean(bloqueio), s.proxima_acao]);
+  await registrarEvento(q, t.id, bloqueio ? 'diretor_retornou_com_pendencia' : 'diretor_aprovou',
+    bloqueio ? 'O Diretor devolveu o resultado com pendências.' : 'O Diretor validou e entregou a resposta no chat.', DIRETOR);
+  return { ...s, rascunho, efeito_confirmado: null };
+}
+
 // ---------- Retomada ----------
+export async function relatorioParaRetomar(q: Q, u: Usuario, tarefaId: string) {
+  const [r] = await q.query<{ execucao_id: string; cliente_id: string; dono_humano_id: string; mensagem: string; autonomia: string | null }>(
+    `select e.id as execucao_id, t.cliente_id, t.dono_humano_id,
+       e.entrada->'contexto'->>'mensagem_chat' as mensagem, e.entrada->'contexto'->>'autonomia' as autonomia
+     from tarefas t join execucoes e on e.tarefa_id = t.id and e.etapa = 'diretor_triagem'
+     where t.id = $1 and t.cliente_id is not null and t.estado = 'concluida' and e.estado = 'concluida' and not t.demo
+       and not exists (
+         select 1 from tarefas a join execucoes x on x.tarefa_id = a.id and x.etapa = 'analisar'
+         where a.parent_id = t.id and x.entrada->'contexto'->>'fluxo_claude' in ('google_ads','meta_ads')
+           and x.entrada->>'instrucao_operacional' like 'Pedido delegado pelo Diretor Geral:%'
+       )`, [tarefaId]);
+  if (!r || (u.perfil !== 'admin' && u.id !== r.dono_humano_id) || !podeVer(u, r.cliente_id, null)
+    || r.autonomia === 'responder' || !r.mensagem || !delegacoesRelatorioAds(r.mensagem).length) return null;
+  return r.execucao_id;
+}
+
 export async function retomarExecucao(b: Banco, u: Usuario, execId: string) {
-  const [ex] = await b.query<ExecRow>('select * from execucoes where id = $1', [execId]);
-  if (!ex) throw new SemAcesso();
-  const t = await autorizarTarefa(b, u, ex.tarefa_id);
-  if (u.perfil !== 'admin' && u.id !== t.dono_humano_id) throw new SemAcesso('Só o dono da tarefa ou a direção pode retomar.');
-  if (ex.estado !== 'falhou') return;
-  await b.query(`update execucoes set estado = 'na_fila', atualizado_em = now() where id = $1`, [execId]);
-  await registrarEvento(b, ex.tarefa_id, 'retomada', `Execução "${ex.etapa}" retomada por ${u.nome}.`, u.nome);
-  await processarFila(b);
+  const retomada = await b.transacao(async q => {
+    const [ex] = await q.query<ExecRow>('select * from execucoes where id = $1 for update', [execId]);
+    if (!ex) throw new SemAcesso();
+    const t = await autorizarTarefa(q, u, ex.tarefa_id);
+    if (u.perfil !== 'admin' && u.id !== t.dono_humano_id) throw new SemAcesso('Só o dono da tarefa ou a direção pode retomar.');
+    const diretor = ex.entrada.contexto.diretor === true;
+    const relatorioReaberto = diretor && ex.estado === 'concluida' && (await relatorioParaRetomar(q, u, t.id)) === ex.id;
+    if (ex.estado !== 'falhou' && !relatorioReaberto) return null;
+    const entrada = relatorioReaberto
+      ? { ...ex.entrada, contexto: { ...ex.entrada.contexto, criar_tarefas: false, relatorio_reaberto: true } } : ex.entrada;
+    await q.query(`update execucoes set estado = 'na_fila', entrada = $2, disponivel_em = now(), atualizado_em = now() where id = $1`, [execId, entrada]);
+    if (relatorioReaberto) {
+      await q.query(`update tarefas set estado = 'na_fila', motivo_bloqueio = null,
+        proximo_passo = 'Consultar as fontes do relatório', atualizado_em = now() where id = $1`, [t.id]);
+      await q.query(`update execucoes set saida = null, concluido_em = null where tarefa_id = $1
+        and etapa = 'diretor_revisao' and estado in ('concluida','falhou')`, [t.id]);
+    }
+    await registrarEvento(q, t.id, 'retomada',
+      relatorioReaberto ? 'Relatório reaberto para consulta das fontes.' : `Execução "${ex.etapa}" retomada por ${u.nome}.`, u.nome);
+    return { diretor, tarefaId: t.parent_id ?? t.id };
+  });
+  if (!retomada) return;
+  if (retomada.diretor) await processarFila(b, undefined, 6, retomada.tarefaId, true);
+  else await processarFila(b);
 }
 
 // ---------- Aprovações (A3) ----------

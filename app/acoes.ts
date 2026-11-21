@@ -4,16 +4,39 @@ import { z } from 'zod';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
+import { after } from 'next/server';
 import { contexto, COOKIE_USUARIO } from '@/lib/sessao';
-import { decidirAprovacao, retomarExecucao, salvarInstrucao, desabilitarPapel, criarCliente, definirAcessoClientes } from '@/lib/orquestracao';
-import { homologarPiloto, homologarFase2 } from '@/lib/homologacao';
+import { decidirAprovacao, retomarExecucao, salvarInstrucao, desabilitarPapel, criarCliente, definirAcessoClientes, processarFila, registrarPedidoDiretor } from '@/lib/orquestracao';
+import { homologarPiloto, homologarFase2, homologarFase3 } from '@/lib/homologacao';
 import { testarIntegracao, testarTodas } from '@/lib/integracoes';
 import { INTEGRACOES } from '@/lib/catalogo';
 import { banco } from '@/lib/db';
 import { carregarUsuario } from '@/lib/escopo';
 import { loginLigado } from '@/lib/auth';
+import { homologarEspecialista, pedirAoEspecialista, registrarChatEspecialista } from '@/lib/especialistas';
+import { FLUXOS_CLAUDE_IDS } from '@/lib/skills-claude';
+import { enviarMensagemChat } from '@/lib/escritorio-ao-vivo';
 
 const atualizar = () => revalidatePath('/', 'layout');
+
+export async function acaoEnviarMensagemChat(entrada: unknown) {
+  const { b, u } = await contexto();
+  return enviarMensagemChat(b, u, entrada);
+}
+
+export async function acaoEnviarAoDiretor(entrada: unknown) {
+  const { b, u } = await contexto();
+  const tarefa = await registrarPedidoDiretor(b, u, entrada);
+  after(async () => { await processarFila(b, undefined, 6, tarefa, true); });
+  return tarefa;
+}
+
+export async function acaoEnviarAoEspecialista(entrada: unknown) {
+  const { b, u } = await contexto();
+  const tarefa = await registrarChatEspecialista(b, u, entrada);
+  after(async () => { await processarFila(b, undefined, 1, tarefa); });
+  return tarefa;
+}
 
 export async function trocarUsuario(fd: FormData) {
   if (loginLigado()) throw new Error('Com login ligado, cada pessoa entra com a própria conta.');
@@ -81,6 +104,32 @@ export async function acaoHomologarFase2() {
   await homologarFase2(b, u);
   atualizar();
   redirect('/agentes#fase2');
+}
+
+export async function acaoHomologarFase3() {
+  const { b, u } = await contexto();
+  await homologarFase3(b, u);
+  atualizar();
+  redirect('/agentes#fase3');
+}
+
+export async function acaoHomologarEspecialista(fd: FormData) {
+  const { b, u } = await contexto();
+  const papel = z.string().min(1).parse(fd.get('papel'));
+  await homologarEspecialista(b, u, papel);
+  atualizar();
+  redirect(`/agentes/${encodeURIComponent(papel)}#claude`);
+}
+
+export async function acaoPedirAoEspecialista(fd: FormData) {
+  const { b, u } = await contexto();
+  const pedido = z.object({
+    id: z.uuid(), fluxo: z.enum(FLUXOS_CLAUDE_IDS), cliente: z.string().min(1).max(150),
+    objetivo: z.string().trim().min(3).max(300), dados: z.string().trim().min(1).max(20_000),
+  }).parse(Object.fromEntries(fd));
+  const tarefaId = await pedirAoEspecialista(b, u, pedido);
+  atualizar();
+  redirect(`/tarefas/${tarefaId}`);
 }
 
 export async function acaoDesabilitarPapel(fd: FormData) {

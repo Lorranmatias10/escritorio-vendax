@@ -1,11 +1,13 @@
 'use client';
 import Link from 'next/link';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Personagem, PersonagemAndando, CICLO_S, PASSADA_POR_ALTURA, type Base } from './personagem';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { Personagem, PersonagemAndando, PersonagemSentado, spriteDe, CICLO_S, PASSADA_POR_ALTURA, type Base } from './personagem';
+import { aberturaSala, cabine, corredor, ELEVADOR_X, peloInterior, PORTAS_SALAS, type PontoPredio as Ponto } from '@/lib/rotas-predio';
+import { CirculacaoPredio, type EstadoElevador } from './circulacao-predio';
+import { ALTURA_PLANTA as IH, LARGURA_PLANTA as IW, POSTOS, CadeiraDoPosto, type Posto } from './postos-predio';
 
-// Prédio vivo: cada agente fica no seu lugar trabalhando e só se levanta quando há motivo.
-// Motivo = passagem de tarefa real (delegação): quem concluiu a etapa vai até o colega de destino,
-// usa o elevador se for outro andar, conversa e volta. Coordenadas em px da imagem (1536x1024).
+// Cada roteiro parte do posto de trabalho e termina com o agente sentado.
+// As coordenadas usam os pixels da planta de 1536 × 1024.
 
 export type EstadoAgente = 'trabalhando' | 'aguardando' | 'bloqueado' | 'fila' | 'ocioso' | 'desligado';
 export type SalaVivo = { id: string; andar: number; r: [number, number, number, number] };
@@ -13,149 +15,249 @@ export type AgenteVivo = {
   id: string; sala: string; nome: string; estado: EstadoAgente; base: Base; href: string; rotulo: string; titulo: string;
   semente: number; selecionado: boolean;
 };
-export type ConversaVivo = { id: string; de: string; para: string; objetivo: string };
+export type ConversaVivo = { id: string; de: string; para: string; objetivo: string; previa?: boolean };
 
-const IW = 1536, IH = 1024;
 const ALTURA = 88;              // pessoa de ~1,75 m na escala do prédio
-const X_ELEVADOR = 1272;        // porta do elevador em cada andar (lado direito do prédio)
-const ELEVADOR = { x: 1301, w: 141 };
-const SEG_POR_ANDAR = 1.3;
-const CONVERSA_S = 6;
-const PAUSA_ENTRE = [14, 26];   // segundos entre uma passagem e a próxima
+const TROCA_POSTURA_S = .36;
+const PORTA_S = .28;
 
-type Ponto = { x: number; base: number; andar: number };
-type Viagem = { agente: string; para: string; fase: 'indo' | 'elevador' | 'conversando' | 'voltando'; pos: Ponto; dur: number; visivel: boolean; esquerda: boolean };
+type Lugar = Ponto & { sala: string; posto?: Posto; pausa: number; atraso: number };
+type Fase = 'levantando' | 'caminhando' | 'aguardando' | 'embarcando' | 'elevador' | 'desembarcando' | 'conversando' | 'sentando';
+type Viagem = { conversa: ConversaVivo; fase: Fase; pos: Ponto; dur: number; visivel: boolean; esquerda: boolean };
 
-const pessoaParada = (s: number) => 4 + (s % 8);      // p05–p12 (em pé)
+const FASES: Record<Fase, string> = {
+  levantando: 'Saindo do posto', caminhando: 'A caminho', aguardando: 'Aguardando o elevador',
+  embarcando: 'Entrando no elevador', elevador: 'Em deslocamento entre andares', desembarcando: 'Saindo do elevador',
+  conversando: 'Na sala de destino', sentando: 'De volta ao posto',
+};
+
 const pessoaQueAnda = (s: number) => s % 4;           // andar-1..4 / p01–p04
 
-export function PredioVivo({ salas, agentes, conversas }: { salas: SalaVivo[]; agentes: AgenteVivo[]; conversas: ConversaVivo[] }) {
-  const porSala = useMemo(() => new Map(salas.map(s => [s.id, s])), [salas]);
-  const andaveis = useMemo(() => new Set(conversas.map(c => c.de)), [conversas]);
-
-  // Lugar de cada agente: espalhados na largura da sala, pés no chão da sala.
+export function PredioVivo({ salas, agentes, conversas, circulacao, pedidoPercurso, mudarPercorrendo }: {
+  salas: SalaVivo[]; agentes: AgenteVivo[]; conversas: ConversaVivo[]; circulacao: boolean;
+  pedidoPercurso: number; mudarPercorrendo: (ativo: boolean) => void;
+}) {
+  // O lugar usa a cadeira registrada na planta e aceita papéis adicionais sem sobrepor postos.
   // Depende só da disposição (quem está em qual sala): a atualização automática não reinicia o roteiro.
-  const disposicao = salas.map(s => `${s.id}:${s.r.join(',')}`).join('|') + '#' + agentes.map(a => `${a.id}@${a.sala}`).join('|');
+  const disposicao = salas.map(s => `${s.id}:${s.andar}:${s.r.join(',')}`).join('|') + '#' + agentes.map(a => `${a.id}@${a.sala}`).join('|');
   const casa = useMemo(() => {
-    const m = new Map<string, Ponto>();
+    const m = new Map<string, Lugar>();
+    const porAndar = new Map<number, string[]>();
+    for (const s of salas) {
+      const nomes = porAndar.get(s.andar) ?? [];
+      nomes.push(...agentes.filter(a => a.sala === s.id).map(a => a.id));
+      porAndar.set(s.andar, nomes);
+    }
     for (const s of salas) {
       const dela = agentes.filter(a => a.sala === s.id);
       const [x, y, w, h] = s.r;
-      dela.forEach((a, i) => m.set(a.id, { x: x + w * (0.14 + (dela.length > 1 ? (i * 0.72) / (dela.length - 1) : 0.36)), base: y + h * 0.975, andar: s.andar }));
+      const ordem = porAndar.get(s.andar)!;
+      const espaco = w * .72 / Math.max(1, dela.length - 1);
+      dela.forEach((a, i) => {
+        const dx = dela.length > 1 ? w * .14 + i * espaco : w / 2;
+        const posto = POSTOS[s.id]?.[i];
+        const pausa = posto?.esquerda ? 40 : -40;
+        m.set(a.id, { x: posto?.x ?? x + dx, base: posto?.base ?? y + h * .975, andar: s.andar, zona: 'sala', sala: s.id, posto, pausa,
+          atraso: .48 + (5 - s.andar) * .34 + ordem.indexOf(a.id) * (48 / ordem.length),
+        });
+      });
     }
     return m;
   }, [disposicao]); // eslint-disable-line react-hooks/exhaustive-deps
   const altura = (andar: number) => Math.min(ALTURA, (salas.find(s => s.andar === andar)?.r[3] ?? 120) * 0.72);
 
   const [viagem, setViagem] = useState<Viagem | null>(null);
-  const [elevador, setElevador] = useState<{ andar: number; dur: number }>({ andar: 1, dur: 0 });
-  const andarElevador = useRef(1);
-  const moverElevador = (andar: number) => { const dur = Math.abs(andar - andarElevador.current) * SEG_POR_ANDAR; andarElevador.current = andar; setElevador({ andar, dur }); return dur; };
-  const [visto] = useState(() => new Set<string>());
+  const [elevador, setElevador] = useState<EstadoElevador>({ andar: 5, dur: 0, aberto: false });
+  const [salaAberta, setSalaAberta] = useState<string | null>(null);
+  const andarElevador = useRef(5);
+  const [visto] = useState(() => new Set(conversas.map(c => c.id)));
   const fila = useRef<ConversaVivo[]>([]);
-  const ocupado = useRef(false);
+  const previa = useRef(pedidoPercurso);
 
-  // Novas passagens entram na frente da fila; as recentes repetem como atividade do dia.
+  useEffect(() => {
+    if (previa.current === pedidoPercurso) return;
+    previa.current = pedidoPercurso;
+    if (viagem || fila.current.length) return;
+    const a = agentes.find(a => a.sala === 'direcao');
+    const b = agentes.find(a => a.sala === 'marketing');
+    if (a && b) fila.current.push({ id: `previa-${pedidoPercurso}`, de: a.id, para: b.id, objetivo: 'Prévia de percurso', previa: true });
+  }, [agentes, pedidoPercurso, viagem]);
+
+  // O histórico alimenta o painel. Só os registros novos geram movimento.
   useEffect(() => {
     const novas = conversas.filter(c => !visto.has(c.id));
     novas.forEach(c => visto.add(c.id));
-    fila.current = [...novas, ...fila.current.filter(c => conversas.some(x => x.id === c.id) && !novas.includes(c))];
-    if (!fila.current.length) fila.current = [...conversas];
+    fila.current.push(...novas.reverse());
   }, [conversas, visto]);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     let cancelado = false;
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    const esperar = (s: number) => new Promise<void>(r => { timers.push(setTimeout(r, s * 1000)); });
-    const velocidade = (andar: number) => (PASSADA_POR_ALTURA * altura(andar)) / CICLO_S;
-
-    async function andar(id: string, para: string, de: Ponto, ate: Ponto, fase: Viagem['fase']) {
-      const d = Math.abs(ate.x - de.x) / velocidade(de.andar);
-      setViagem({ agente: id, para, fase, pos: ate, dur: d, visivel: true, esquerda: ate.x < de.x });
-      await esperar(d);
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const esperar = (s: number) => new Promise<void>(r => {
+      const id = setTimeout(() => { timers.delete(id); r(); }, s * 1000);
+      timers.add(id);
+    });
+    async function caminhar(c: ConversaVivo, de: Ponto, ate: Ponto, fase: Fase = 'caminhando') {
+      if (cancelado) return;
+      const dx = ate.x - de.x;
+      const dy = ate.base - de.base;
+      if (dx === 0 && dy === 0) return;
+      const velocidade = ALTURA * PASSADA_POR_ALTURA / CICLO_S;
+      const dur = Math.hypot(dx, dy * 3) / velocidade;
+      setViagem(v => ({ conversa: c, fase, pos: ate, dur, visivel: true, esquerda: dx === 0 ? v?.esquerda ?? false : dx < 0 }));
+      await esperar(dur);
     }
-    async function trocarDeAndar(id: string, para: string, de: Ponto, ate: Ponto, fase: Viagem['fase']) {
-      const naPorta = { ...de, x: X_ELEVADOR };
-      const busca = moverElevador(de.andar); // o elevador vem buscar enquanto o agente caminha até a porta
-      const ida = andar(id, para, de, naPorta, fase);
-      await Promise.all([ida, esperar(busca)]);
-      if (cancelado) return naPorta;
+    async function interior(c: ConversaVivo, de: Ponto, ate: Ponto) {
+      let anterior = de;
+      for (const p of peloInterior(de, ate)) {
+        await caminhar(c, anterior, p);
+        anterior = p;
+      }
+    }
+    async function cruzar(c: ConversaVivo, sala: string, saindo: boolean) {
+      const { deDentro, deFora } = aberturaSala(sala);
+      if (cancelado) return;
+      setSalaAberta(sala);
+      await esperar(PORTA_S);
+      await caminhar(c, saindo ? deDentro : deFora, saindo ? deFora : deDentro);
+      if (!cancelado) setSalaAberta(null);
+    }
+    function moverElevador(andar: number) {
+      const saltos = Math.abs(andarElevador.current - andar);
+      const dur = saltos ? .24 + saltos * .52 : 0;
+      andarElevador.current = andar;
+      setElevador({ andar, dur, aberto: false });
+      return esperar(dur);
+    }
+    function portasElevador(aberto: boolean) {
+      setElevador(v => ({ ...v, aberto }));
+      return esperar(PORTA_S);
+    }
+    async function elevadorEntre(c: ConversaVivo, de: Ponto, ate: number) {
+      const embarque = corredor(de.andar, ELEVADOR_X);
+      const desembarque = corredor(ate, ELEVADOR_X);
+      await Promise.all([caminhar(c, de, embarque), moverElevador(de.andar)]);
+      if (cancelado) return desembarque;
+      setViagem(v => v && { ...v, fase: 'aguardando', dur: 0 });
+      await portasElevador(true);
+      await caminhar(c, embarque, cabine(de.andar), 'embarcando');
+      if (cancelado) return desembarque;
       setViagem(v => v && { ...v, fase: 'elevador', visivel: false, dur: 0 });
-      await esperar(0.6);
-      const t = moverElevador(ate.andar);
-      await esperar(t + 0.4);
-      const saida = { x: X_ELEVADOR, base: ate.base, andar: ate.andar };
-      setViagem(v => v && { ...v, fase, pos: saida, visivel: true, dur: 0, esquerda: true });
-      await esperar(0.5);
-      return saida;
+      await portasElevador(false);
+      if (cancelado) return desembarque;
+      await moverElevador(ate);
+      if (cancelado) return desembarque;
+      setViagem(v => v && { ...v, pos: cabine(ate), fase: 'elevador', dur: 0 });
+      await portasElevador(true);
+      await caminhar(c, cabine(ate), desembarque, 'desembarcando');
+      if (!cancelado) await portasElevador(false);
+      return desembarque;
     }
-
+    async function percurso(c: ConversaVivo, de: Lugar, ate: Lugar) {
+      if (de.sala === ate.sala) {
+        await interior(c, de, ate);
+        return;
+      }
+      const saida = aberturaSala(de.sala);
+      const entrada = aberturaSala(ate.sala);
+      await interior(c, de, saida.deDentro);
+      await cruzar(c, de.sala, true);
+      if (cancelado) return;
+      const piso = de.andar === ate.andar ? saida.deFora : await elevadorEntre(c, saida.deFora, ate.andar);
+      await caminhar(c, piso, entrada.deFora);
+      await cruzar(c, ate.sala, false);
+      await interior(c, entrada.deDentro, ate);
+    }
     async function visita(c: ConversaVivo) {
       const origem = casa.get(c.de), destino = casa.get(c.para);
-      if (!origem || !destino) return;
-      // Para ao lado do colega, a uma distância de conversa, do lado de onde veio.
-      const vemDaDireita = origem.andar !== destino.andar || origem.x > destino.x;
-      const encontro = { ...destino, x: destino.x + (vemDaDireita ? 1 : -1) * altura(destino.andar) * 0.42 };
-      let pos = origem;
-      if (origem.andar !== destino.andar) pos = await trocarDeAndar(c.de, c.para, pos, destino, 'indo');
+      if (!origem || !destino || !PORTAS_SALAS[origem.sala] || !PORTAS_SALAS[destino.sala]) return;
+      const veioDaDireita = (origem.sala === destino.sala ? origem.x : PORTAS_SALAS[destino.sala].x) > destino.x;
+      const encontro = { ...destino, x: destino.x + (veioDaDireita ? 38 : -38) };
+      setViagem({ conversa: c, fase: 'levantando', pos: origem, dur: 0, visivel: true, esquerda: origem.x > destino.x });
+      await esperar(TROCA_POSTURA_S);
       if (cancelado) return;
-      await andar(c.de, c.para, pos, encontro, 'indo');
+      await percurso(c, origem, encontro);
       if (cancelado) return;
-      setViagem(v => v && { ...v, fase: 'conversando', dur: 0, esquerda: vemDaDireita });
-      await esperar(CONVERSA_S);
+      setViagem(v => v && { ...v, fase: 'conversando', dur: 0, esquerda: veioDaDireita });
+      await esperar(c.previa ? .9 : 1.8);
       if (cancelado) return;
-      pos = encontro;
-      if (origem.andar !== destino.andar) pos = await trocarDeAndar(c.de, c.para, pos, origem, 'voltando');
+      await percurso(c, encontro, origem);
       if (cancelado) return;
-      await andar(c.de, c.para, pos, origem, 'voltando');
-      setViagem(null);
+      setViagem(v => v && { ...v, fase: 'sentando', dur: 0, esquerda: !!origem.posto?.esquerda });
+      await esperar(TROCA_POSTURA_S);
+      if (!cancelado) setViagem(null);
     }
 
     (async () => {
-      await esperar(3);
       while (!cancelado) {
         const c = fila.current.shift();
-        if (c) { fila.current.push(c); ocupado.current = true; await visita(c); ocupado.current = false; }
-        await esperar(PAUSA_ENTRE[0] + Math.random() * (PAUSA_ENTRE[1] - PAUSA_ENTRE[0]));
+        if (c) {
+          mudarPercorrendo(true);
+          await visita(c);
+          if (!cancelado) mudarPercorrendo(false);
+        }
+        await esperar(c ? .28 : .14);
       }
     })();
-    return () => { cancelado = true; timers.forEach(clearTimeout); setViagem(null); };
+    return () => { cancelado = true; timers.forEach(clearTimeout); setViagem(null); mudarPercorrendo(false); };
     // A rotina recomeça só se a disposição das salas mudar; a fila é lida por referência.
-  }, [casa]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [casa, mudarPercorrendo]);
 
-  const elevadorSala = salas.filter(s => s.andar === elevador.andar)[0];
   return (
     <>
-      {/* Elevador: só se move quando alguém o usa */}
-      {elevadorSala && (
-        <div aria-hidden className="absolute rounded-[3px] border border-vx-verde/50 bg-vx-verde/[.07]"
-          style={{ left: `${(ELEVADOR.x / IW) * 100}%`, width: `${(ELEVADOR.w / IW) * 100}%`, top: `${(elevadorSala.r[1] / IH) * 100}%`, height: `${(elevadorSala.r[3] / IH) * 100}%`,
-            transition: `top ${elevador.dur}s cubic-bezier(.45,0,.3,1), height ${elevador.dur}s cubic-bezier(.45,0,.3,1)` }} />
-      )}
+      <CirculacaoPredio salaAberta={salaAberta} elevador={elevador} />
+      {agentes.map(a => {
+        const lugar = casa.get(a.id);
+        if (!lugar?.posto) return null;
+        const v = viagem?.conversa.de === a.id ? viagem : null;
+        const visitado = viagem?.conversa.para === a.id && viagem.fase === 'conversando';
+        return <CadeiraDoPosto key={a.id} posto={lugar.posto} afastada={!!v && v.fase !== 'sentando'}
+          emPausa={circulacao && !v && !visitado && a.estado === 'ocioso' && a.base !== 'nenhum'} atraso={lugar.atraso} />;
+      })}
       <ul aria-label="Agentes no prédio" className="pointer-events-none absolute inset-0">
         {agentes.map(a => {
           const lugar = casa.get(a.id);
           if (!lugar) return null;
-          const v = viagem?.agente === a.id ? viagem : null;
-          const visitado = viagem?.para === a.id && viagem.fase === 'conversando' ? viagem : null;
+          const v = viagem?.conversa.de === a.id ? viagem : null;
+          const visitado = viagem?.conversa.para === a.id && viagem.fase === 'conversando' ? viagem : null;
           const pos = v ? v.pos : lugar;
           const h = altura(pos.andar);
-          const anda = !!v && (v.fase === 'indo' || v.fase === 'voltando') && v.dur > 0;
-          const sala = porSala.get(a.sala);
-          // Quem visita vira o rosto para o colega; o visitado vira para quem chegou.
-          const olhaEsquerda = v ? v.esquerda : visitado ? !visitado.esquerda : (sala ? lugar.x > sala.r[0] + sala.r[2] / 2 : false);
+          const anda = !!v && (['caminhando', 'embarcando', 'desembarcando'].includes(v.fase));
+          const emPausa = circulacao && !!lugar.posto && !v && !visitado && a.estado === 'ocioso' && a.base !== 'nenhum';
+          const sentado = !!lugar.posto && (!v || v.fase === 'sentando');
+          const esquerda = v ? v.esquerda : visitado ? !visitado.esquerda : !!lugar.posto?.esquerda;
+          const pessoa = pessoaQueAnda(a.semente);
+          const estilo = {
+            left: `${(pos.x / IW) * 100}%`, top: `${((pos.base - h) / IH) * 100}%`, height: `${(h / IH) * 100}%`, width: `${(h * .57 / IW) * 100}%`,
+            transition: v ? `left ${v.dur}s linear, top ${v.dur}s linear, opacity .16s` : 'opacity .3s',
+            opacity: v && !v.visivel ? 0 : 1, zIndex: v?.pos.zona === 'corredor' ? 8 : v ? 5 : 2,
+            ...(emPausa ? {
+              '--vx-lugar': `${(lugar.x / IW) * 100}%`,
+              '--vx-pausa': `${((lugar.x + lugar.pausa) / IW) * 100}%`,
+              '--vx-atraso': `${lugar.atraso}s`,
+              '--vx-ida': Math.sign(lugar.pausa), '--vx-volta': -Math.sign(lugar.pausa),
+            } : {}),
+          } as CSSProperties;
           return (
-            <li key={a.id} className="absolute -translate-x-1/2"
-              style={{ left: `${(pos.x / IW) * 100}%`, top: `${((pos.base - h) / IH) * 100}%`, height: `${(h / IH) * 100}%`,
-                transition: v ? `left ${v.dur}s linear, opacity .3s` : 'opacity .3s', opacity: v && !v.visivel ? 0 : 1, zIndex: v ? 3 : 2 }}>
+            <li key={a.id} className="absolute -translate-x-1/2" data-pausa-posto={emPausa} data-postura={sentado ? 'sentado' : 'em-pe'} data-zona={pos.zona} style={estilo}>
               <Link href={a.href} title={a.titulo} aria-label={a.rotulo}
                 className={`pointer-events-auto group relative block h-full rounded-[3px] ${a.selecionado ? 'ring-2 ring-vx-verde ring-offset-1' : ''}`}>
-                <span className={`block h-full ${olhaEsquerda ? '-scale-x-100' : ''}`}>
-                  {andaveis.has(a.id)
-                    ? <PersonagemAndando pessoa={pessoaQueAnda(a.semente)} base={a.base} andando={anda} />
-                    : <Personagem sprite={visitado ? 4 + (a.semente % 4) : pessoaParada(a.semente)} base={a.base} apagado={a.estado === 'desligado'} />}
+                <span aria-hidden className="vx-figura-posto vx-em-pe">
+                  <span className={`block h-full ${esquerda ? '-scale-x-100' : ''}`}>
+                    {anda || v?.fase === 'elevador'
+                      ? <PersonagemAndando pessoa={pessoa} base={a.base} andando={anda} />
+                      : <Personagem sprite={spriteDe(v?.fase === 'conversando' ? 'conversa' : 'trabalha', a.semente)} base={a.base} apagado={a.estado === 'desligado'} />}
+                  </span>
                 </span>
+                {lugar.posto && <span aria-hidden className="vx-figura-posto vx-sentado" data-esquerda={esquerda}>
+                  <span className={`block h-full ${a.estado === 'trabalhando' ? 'vx-digitando' : ''}`}>
+                    <PersonagemSentado pessoa={pessoa} base={a.base} apagado={a.estado === 'desligado'} />
+                  </span>
+                </span>}
+                {emPausa && <span aria-hidden className="vx-figura-posto vx-andando-pausa">
+                  <PersonagemAndando pessoa={pessoa} base={a.base} ciclo={1.8} />
+                </span>}
                 <span aria-hidden className="pointer-events-none absolute bottom-full left-1/2 mb-1 -translate-x-1/2 whitespace-nowrap rounded bg-vx-grafite px-1.5 py-px text-[10px] font-medium text-white opacity-0 shadow transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">{a.nome}</span>
                 {(v?.fase === 'conversando' || visitado) && (
                   <span aria-hidden className={`vx-fala ${visitado ? 'vx-fala-b' : ''} pointer-events-none absolute -top-[6%] left-1/2 rounded-full bg-white px-1 text-[clamp(6px,0.6vw,9px)] font-bold leading-[11px] text-vx-grafite shadow ring-1 ring-vx-linha`}>•••</span>
@@ -167,8 +269,9 @@ export function PredioVivo({ salas, agentes, conversas }: { salas: SalaVivo[]; a
         })}
       </ul>
       {viagem && (
-        <p aria-live="polite" className="sr-only">
-          {agentes.find(a => a.id === viagem.agente)?.nome} {viagem.fase === 'conversando' ? 'conversa com' : 'vai até'} {agentes.find(a => a.id === viagem.para)?.nome}
+        <p aria-live="polite" className="vx-predio-passagem" data-fase={viagem.fase}>
+          <span aria-hidden />{viagem.conversa.previa && <strong>Prévia</strong>}<span>{FASES[viagem.fase]}</span>
+          <span aria-hidden>·</span><span>{agentes.find(a => a.id === viagem.conversa.de)?.nome}</span>
         </p>
       )}
     </>
